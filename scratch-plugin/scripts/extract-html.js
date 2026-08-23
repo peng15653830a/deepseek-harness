@@ -1,0 +1,25 @@
+// 提取 HTML 正文的临时工具脚本
+const fs = require('fs')
+const file = process.argv[2]
+const maxLen = Number(process.argv[3] || 12000)
+const html = fs.readFileSync(file, 'utf8')
+const m = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i)
+  || html.match(/<main[^>]*>([\s\S]*?)<\/main>/i)
+  || html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+let t = m ? m[1] : html
+t = t
+  .replace(/<script[\s\S]*?<\/script>/gi, '')
+  .replace(/<style[\s\S]*?<\/style>/gi, '')
+  .replace(/<[^>]+>/g, ' ')
+  .replace(/&nbsp;/g, ' ')
+  .replace(/&quot;/g, '"')
+  .replace(/&amp;/g, '&')
+  .replace(/&#39;/g, "'")
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&ldquo;/g, '\u201c')
+  .replace(/&rdquo;/g, '\u201d')
+  .replace(/&hellip;/g, '\u2026')
+  .replace(/[ \t]+/g, ' ')
+  .replace(/\n{3,}/g, '\n\n')
+console.log(t.slice(0, maxLen))

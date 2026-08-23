@@ -1,0 +1,47 @@
+# ComfyUI 生图工具插件 — patch 文件
+# 使用方式：pnpm dsh web --patch ./scratch-plugin/cordis.yml
+#
+# 前置条件：
+#   1. ComfyUI 已在本地运行
+#   2. 在 ComfyUI 中设计好文生图工作流 → 菜单 → 保存（API 格式）
+#   3. 将导出的 JSON 路径填入下方 workflowPath
+
+- insert:
+    - id: comfyui
+      name: 'file:///D:/workspaces/deepseek-harness/scratch-plugin/src/comfyui-tool.ts'
+      config:
+        # ComfyUI 服务地址（默认 8188 端口）
+        baseUrl: 'http://127.0.0.1:8188'
+        # 使用 Qwen-Rapid AIO 文生图/图生图工作流（Qwen-Image 编辑模型）
+        workflowPath: 'D:\workspaces\deepseek-harness\scratch-plugin\workflows\Qwen-Rapid-AIO-01.json'
+
+    # 破限创作插件 — 从 SillyTavern 预设《4.4【可待】甲戌 肆壹》提取
+    # 通过 systemPrompt.section() 注入「创作系统」身份与审核解除声明
+    # skipProviders：跳过这些 provider 的破限注入（本地模型本身 uncensored，不需要）
+    - id: roleplay-unlock
+      name: 'file:///D:/workspaces/deepseek-harness/scratch-plugin/src/roleplay-unlock.ts'
+      config:
+        # 本地模型不需要破限（llama-local = 本地 Qwen27B）
+        skipProviders:
+          - llama-local
+        # storyRule: false —— 关闭 complete 模式下自带的「写作配图规则」
+        #（本地 LLM 与 ComfyUI 争抢 32GB 显存，无法同时运行；配图时改回 true 并启动 ComfyUI）
+        storyRule: false
+
+    # 小说配图插件 — 注入「写作配图规则」：每写约 500 字调用一次 generate_image
+    # ⚠️ 与本地 LLM 争抢显存（Qwen-Image ~29GB + Qwen27B ~19GB > 32GB），默认关闭
+    # 启用方法：enabled 改回 true，并确保 ComfyUI 已运行（同时把 roleplay-unlock 的 storyRule 改回 true）
+    - id: story-illustrator
+      name: 'file:///D:/workspaces/deepseek-harness/scratch-plugin/src/story-illustrator.ts'
+      config:
+        enabled: false
+        # 每多少字生成一张配图（默认 500）
+        interval: 500
+
+    # 纯中文输出约束 — 强制模型输出纯中文，不混入英文（独立于破限插件，本地/API 模型均生效）
+    - id: language-constraint
+      name: 'file:///D:/workspaces/deepseek-harness/scratch-plugin/src/language-constraint.ts'
+
+    # 小说文风模仿 — 仿《熟女的悲哀》文风（繁体中文、心理反问、雅称描写），本地/API 模型均生效
+    - id: story-style
+      name: 'file:///D:/workspaces/deepseek-harness/scratch-plugin/src/story-style.ts'

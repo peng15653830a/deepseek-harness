@@ -233,6 +233,10 @@
     - id: ui-deliverables
       name: '@deepseek-ai/dsh-client-ui-deliverables'
 
+    # Immersive ebook-style view tab for text + image roleplay and creation.
+    - id: ui-immersion
+      name: '@deepseek-ai/dsh-client-ui-immersion'
+
 
     - id: ui-workspace
       name: '@deepseek-ai/dsh-client-ui-workspace'

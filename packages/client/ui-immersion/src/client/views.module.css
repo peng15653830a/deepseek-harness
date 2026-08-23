@@ -1,0 +1,260 @@
+/* Immersion ebook-style view */
+
+.view {
+  padding: 2rem 1.5rem;
+  max-width: 48rem;
+  margin: 0 auto;
+  line-height: 1.9;
+  font-size: 1.1rem;
+  color: var(--dsh-color-text-primary, #1a1a2e);
+  min-height: 100%;
+}
+
+/* ── Message wrapper ── */
+.message {
+  margin-bottom: 1.8rem;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── User messages (right-aligned, lighter) ── */
+.userBlock {
+  text-align: right;
+}
+
+.userBlock .body {
+  background: var(--dsh-color-surface-raised, #f0f0f5);
+  border-radius: 1rem 1rem 0.25rem 1rem;
+  padding: 1rem 1.25rem;
+  display: inline-block;
+  max-width: 85%;
+  text-align: left;
+  color: var(--dsh-color-text-primary, #1a1a2e);
+}
+
+/* ── Assistant messages (left-aligned, primary) ── */
+.assistantBlock {
+  text-align: left;
+}
+
+.assistantBlock .body {
+  padding: 0.25rem 0;
+}
+
+.assistantBlock .label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dsh-color-text-tertiary, #888);
+  margin-bottom: 0.25rem;
+}
+
+/* ── Prose text ── */
+.text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.assistantBlock .text {
+  font-size: 1.05rem;
+  line-height: 1.85;
+}
+
+/* ── Images ── */
+.imageRow {
+  margin: 0.75rem 0;
+}
+
+.imageRow img {
+  max-width: 100%;
+  max-height: 60vh;
+  border-radius: 0.5rem;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  object-fit: contain;
+}
+
+/* ── Reasoning (collapsible) ── */
+.reasoningToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--dsh-color-text-tertiary, #888);
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--dsh-color-border, #e0e0e0);
+  border-radius: 0.35rem;
+  background: transparent;
+  margin: 0.5rem 0;
+  transition: all 0.15s ease;
+}
+
+.reasoningToggle:hover {
+  background: var(--dsh-color-surface-hover, #f5f5f5);
+}
+
+.reasoningContent {
+  font-size: 0.9rem;
+  color: var(--dsh-color-text-secondary, #666);
+  padding: 0.75rem 1rem;
+  background: var(--dsh-color-surface-raised, #f8f8fa);
+  border-radius: 0.5rem;
+  margin: 0.5rem 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+/* ── Tool calls (collapsible) ── */
+.toolBar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 1rem 0;
+}
+
+.toolToggle {
+  font-size: 0.8rem;
+  color: var(--dsh-color-text-tertiary, #888);
+  cursor: pointer;
+  padding: 0.35rem 1rem;
+  border: 1px dashed var(--dsh-color-border, #ccc);
+  border-radius: 2rem;
+  background: transparent;
+  transition: all 0.15s ease;
+}
+
+.toolToggle:hover {
+  border-color: var(--dsh-color-text-tertiary, #888);
+  color: var(--dsh-color-text-secondary, #555);
+}
+
+.toolCallsArea {
+  margin: 0.5rem 0 1rem 0;
+  padding: 0.75rem 1rem;
+  background: var(--dsh-color-surface-raised, #f8f8fa);
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+
+.toolCallItem {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--dsh-color-border, #eee);
+}
+
+.toolCallItem:last-child {
+  border-bottom: none;
+}
+
+.toolCallHeader {
+  font-weight: 600;
+  color: var(--dsh-color-text-secondary, #555);
+  margin-bottom: 0.25rem;
+  font-size: 0.8rem;
+}
+
+.toolCallArgs {
+  font-family: var(--dsh-font-mono, 'Fira Code', 'Consolas', monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── Separator between turns ── */
+.turnSeparator {
+  text-align: center;
+  margin: 2rem 0;
+  color: var(--dsh-color-text-tertiary, #ccc);
+  font-size: 0.75rem;
+  letter-spacing: 0.5em;
+  user-select: none;
+  opacity: 0.5;
+}
+
+/* ── Running indicator ── */
+.runningIndicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  color: var(--dsh-color-text-secondary, #666);
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+.dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--dsh-color-accent, #4a90d9);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* ── Empty state ── */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 60vh;
+  color: var(--dsh-color-text-tertiary, #aaa);
+  font-size: 1rem;
+}
+
+.emptyIcon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+  opacity: 0.3;
+}
+
+/* ── Tool result images ── */
+.toolImage {
+  margin: 0.5rem 0;
+}
+
+.toolImage img {
+  max-width: 100%;
+  max-height: 50vh;
+  border-radius: 0.5rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+/* ── Dark theme adjustments ── */
+:global(body.dsh-theme-dark) .view {
+  color: var(--dsh-color-text-primary, #e0e0e0);
+}
+
+:global(body.dsh-theme-dark) .userBlock .body {
+  background: var(--dsh-color-surface-raised, #2a2a3e);
+}
+
+:global(body.dsh-theme-dark) .assistantBlock .body {
+  color: var(--dsh-color-text-primary, #f0f0f0);
+}
+
+:global(body.dsh-theme-dark) .assistantBlock .text {
+  color: var(--dsh-color-text-primary, #e8e8e8);
+}
+
+:global(body.dsh-theme-dark) .assistantBlock .body p {
+  color: var(--dsh-color-text-primary, #e8e8e8);
+}
+
+:global(body.dsh-theme-dark) .reasoningContent {
+  background: var(--dsh-color-surface-raised, #222);
+}
+
+:global(body.dsh-theme-dark) .toolCallsArea {
+  background: var(--dsh-color-surface-raised, #222);
+}
