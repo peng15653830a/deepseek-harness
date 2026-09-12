@@ -84,7 +84,7 @@ kind: "package-reference"
 | [`src/index.ts`](src/index.ts) | 插件入口：配置 schema、环境变量回退、提供方注册 |
 | [`src/provider.ts`](src/provider.ts) | `TavilySearchProvider`：请求分发、中止分类、结果映射 |
 | [`src/types.ts`](src/types.ts) | Tavily 协议类型：`TavilySearchResponse`、`TavilyResult`、`TavilyError` |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件（无运行时不变式；约定在服务处强制执行） |
+| — | 不发布运行时不变量配套入口；除所属 seam 强制执行的约定外，本包没有独立的事件序列或可变数据关系。 |
 
 ### 请求与映射流程
 
@@ -100,7 +100,7 @@ kind: "package-reference"
 当包级约定不够用时阅读以下页面。它们从共享词汇逐步进入服务、面向模型的工具与设计依据。
 
 - [web 子系统](../../../docs/subsystems/web.zh.md)——穷尽式的搜索请求／结果词汇与错误码。
-- [web 包映射](../README.zh.md)——七包家族与各角色。
+- [web 包映射](../README.zh.md)——八包家族与各角色。
 - [dsh-web](../web/README.zh.md)——本提供方注册进入的 web 服务。
 - [dsh-tool-web](../tool-web/README.zh.md)——渲染本提供方来源的面向模型 `web_search` 工具。
 - [生成配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-web-search-tavily)——每个受支持配置字段及其源声明。

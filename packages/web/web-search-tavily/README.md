@@ -84,7 +84,7 @@ The provider is a thin adapter over Tavily's API with the same deliberate rules 
 | [`src/index.ts`](src/index.ts) | Plugin entry: config schema, environment fallback, provider registration |
 | [`src/provider.ts`](src/provider.ts) | The `TavilySearchProvider`: request dispatch, abort classification, result mapping |
 | [`src/types.ts`](src/types.ts) | Tavily wire types: `TavilySearchResponse`, `TavilyResult`, `TavilyError` |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; contracts are enforced at the service) |
+| — | No runtime invariant companion is published; this package exposes no independent event sequence or mutable data relation beyond contracts enforced at its owning seam. |
 
 ### Request and mapping flow
 
@@ -100,7 +100,7 @@ The provider is a thin adapter over Tavily's API with the same deliberate rules 
 Read these pages when the package-level contract is not enough. They move from the shared vocabulary to the service, the model-facing tools, and the design rationale.
 
 - [Web subsystem](../../../docs/subsystems/web.md) — the exhaustive search request/result vocabulary and error codes.
-- [Web package map](../README.md) — the seven-package family and each role.
+- [Web package map](../README.md) — the eight-package family and each role.
 - [dsh-web](../web/README.md) — the web service this provider registers into.
 - [dsh-tool-web](../tool-web/README.md) — the model-facing `web_search` tool that renders this provider's sources.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-web-search-tavily) — every accepted config field and its source declaration.
