@@ -460,6 +460,9 @@
     - id: web-search-tavily
       name: '@deepseek-ai/dsh-web-search-tavily'
 
+    - id: web-search-searxng
+      name: '@deepseek-ai/dsh-web-search-searxng'
+
     - id: web-fetch-http
       name: '@deepseek-ai/dsh-web-fetch-http'
 
