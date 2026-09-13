@@ -44,3 +44,7 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+
+# Transient agent-run logs and scratch outputs.
+.tmp-*
+packages/tavern/.tmp-*
