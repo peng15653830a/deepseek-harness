@@ -12,13 +12,19 @@ function isBuildFaceClient(value: unknown): boolean {
  * TypeScript project and runs Typert. The Client pass selects packages that
  * declare a browser bundle and lets their package-local configs emit both
  * their Node loader entry and browser artifact.
+ *
+ * `packages/tavern/tavern-plugin` is excluded: its host and client halves are
+ * hand-owned prebuilt ESM (`lib/*.js`), not TypeScript emit, so the bundler
+ * has no entry to build for it. `packages/tavern/image-gen` is excluded for
+ * the same reason as a mixed-face package: it builds through its own package
+ * scripts once the client face has produced the sibling type declarations.
  */
 export default defineConfig(({ env }) => {
   const client = isBuildFaceClient(env?.DSH_BUILD_FACE)
   return {
     workspace: client
-      ? ['vendor/*', 'packages/*/*', 'apps/cli']
-      : ['vendor/*', 'packages/*/*', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
+      ? ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', 'apps/cli']
+      : ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
     entry: client ? '' : ['lib/types/{index,invariant,startup}.js'],
     outDir: 'lib',
     format: ['esm'],

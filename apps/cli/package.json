@@ -97,6 +97,10 @@
     "@deepseek-ai/dsh-workflow-worker-thread": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^",
     "commander": "^15.0.0",
+    "dsh-better-sidebar": "0.17.1",
+    "dsh-tavern-plugin": "workspace:^",
+    "dsh-tavern-remote": "workspace:^",
+    "dsh-web-mobile": "2.3.0",
     "js-yaml": "^4.2.0",
     "node-addon-require-builtin": "^0.1.4",
     "@deepseek-ai/dsh-http-proxy": "workspace:^"
