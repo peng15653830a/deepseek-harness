@@ -1,0 +1,382 @@
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import test from 'node:test'
+import vm from 'node:vm'
+
+async function loadFactory() {
+  const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
+  let descriptor
+  const sandbox = { window: { __ModuleLoader__: { load(value) { descriptor = value } }, setInterval, clearInterval }, console, AbortController }
+  vm.runInNewContext(source, sandbox)
+  return descriptor.factory(function () { return {} }).createLiveTavernViewModule
+}
+
+function fakeTimers() {
+  const pending = []
+  return {
+    schedule(run, delay) {
+      const timer = { run, delay, cancelled: false }
+      pending.push(timer)
+      return timer
+    },
+    cancel(timer) { timer.cancelled = true },
+    async runNext() {
+      const timer = pending.find(function (item) { return !item.cancelled })
+      assert.ok(timer, 'expected a scheduled refresh')
+      timer.cancelled = true
+      timer.run()
+      await new Promise(function (resolve) { setImmediate(resolve) })
+      return timer.delay
+    },
+    dropAll() { pending.forEach(function (item) { item.cancelled = true }) },
+    activeDelays() { return pending.filter(function (item) { return !item.cancelled }).map(function (item) { return item.delay }) }
+  }
+}
+
+function fakeIntervals() {
+  const active = []
+  return {
+    start(run, delay) {
+      const interval = { run, delay, cancelled: false }
+      active.push(interval)
+      return interval
+    },
+    stop(interval) { interval.cancelled = true },
+    async tick() {
+      const interval = active.find(function (item) { return !item.cancelled })
+      assert.ok(interval, 'expected an active watchdog')
+      interval.run()
+      await new Promise(function (resolve) { setImmediate(resolve) })
+      return interval.delay
+    }
+  }
+}
+
+const createLiveTavernViewModule = await loadFactory()
+
+test('多个调用者通过同一 interface 订阅时只发出一次加载', async function () {
+  const timers = fakeTimers()
+  let loads = 0
+  const module = createLiveTavernViewModule({
+    load: async function () { loads += 1; return { view: { busy: false, marker: loads } } },
+    shouldPoll(view) { return view && view.busy === true },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const left = []
+  const right = []
+  const stopLeft = module.subscribe('session-1', function (state) { left.push(state) })
+  const stopRight = module.subscribe('session-1', function (state) { right.push(state) })
+
+  await timers.runNext()
+
+  assert.equal(loads, 1)
+  assert.equal(module.getSnapshot('session-1').phase, 'ready')
+  assert.equal(module.getSnapshot('session-1').view.marker, 1)
+  assert.equal(left.at(-1).view.marker, 1)
+  assert.equal(right.at(-1).view.marker, 1)
+  stopLeft(); stopRight()
+})
+
+test('后台 Activity busy 时由 module 统一快速轮询，完成后停止', async function () {
+  const timers = fakeTimers()
+  const statuses = [true, false]
+  const module = createLiveTavernViewModule({
+    load: async function () { return { view: { busy: statuses.shift() || false } } },
+    shouldPoll(view) { return view && view.busy === true },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-2', function () {})
+
+  await timers.runNext()
+  assert.deepEqual(timers.activeDelays(), [200])
+  await timers.runNext()
+  assert.equal(module.getSnapshot('session-2').view.busy, false)
+  assert.deepEqual(timers.activeDelays(), [])
+  stop()
+})
+
+test('生成期完整视图不自动轮询，只在状态事件失效后重读', async function () {
+  const timers = fakeTimers()
+  let loads = 0
+  const module = createLiveTavernViewModule({
+    load: async function () { loads += 1; return { view: { activity: { busy: loads === 1 } } } },
+    shouldPoll(view) { return !!(view && view.activity && view.activity.busy) },
+    pollWhileBusy: false,
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-event-driven', function () {})
+
+  await timers.runNext()
+  assert.equal(loads, 1)
+  assert.deepEqual(timers.activeDelays(), [])
+
+  module.invalidate('session-event-driven')
+  await timers.runNext()
+  assert.equal(loads, 2)
+  assert.equal(module.getSnapshot('session-event-driven').view.activity.busy, false)
+  stop()
+})
+
+test('后台已空闲但主轮询定时器丢失时，watchdog 会恢复权威查询并解除 busy', async function () {
+  const timers = fakeTimers()
+  const watchdog = fakeIntervals()
+  const statuses = [true, false]
+  const module = createLiveTavernViewModule({
+    load: async function () { return { view: { busy: statuses.shift() || false } } },
+    shouldPoll(view) { return view && view.busy === true },
+    schedule: timers.schedule,
+    cancel: timers.cancel,
+    startWatchdog: watchdog.start,
+    stopWatchdog: watchdog.stop,
+    watchdogIntervalMs: 1000
+  })
+  const stop = module.subscribe('session-watchdog', function () {})
+
+  await timers.runNext()
+  assert.equal(module.getSnapshot('session-watchdog').view.busy, true)
+  timers.dropAll()
+
+  assert.equal(await watchdog.tick(), 1000)
+  assert.equal(module.getSnapshot('session-watchdog').view.busy, false)
+  stop()
+})
+
+test('客户端先投影 busy 时立即开始权威轮询，服务端 idle 后解除门控', async function () {
+  const timers = fakeTimers()
+  const module = createLiveTavernViewModule({
+    load: async function () { return { view: { busy: false, phase: 'idle' } } },
+    shouldPoll(view) { return view && view.busy === true },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-optimistic', function () {})
+  await timers.runNext()
+
+  const release = module.setView('session-optimistic', { busy: true, phase: 'running' })
+  assert.deepEqual(timers.activeDelays(), [0])
+  await timers.runNext()
+
+  assert.equal(module.getSnapshot('session-optimistic').view.busy, true, '服务端尚未登记 Operation 时不能用旧 idle 提前解锁')
+  assert.deepEqual(timers.activeDelays(), [200])
+  release()
+  assert.deepEqual(timers.activeDelays(), [0])
+  await timers.runNext()
+
+  assert.equal(module.getSnapshot('session-optimistic').view.busy, false)
+  assert.equal(module.getSnapshot('session-optimistic').view.phase, 'idle')
+  assert.deepEqual(timers.activeDelays(), [])
+  stop()
+})
+
+test('失效通知在加载中到达时只排队一次后续刷新', async function () {
+  const timers = fakeTimers()
+  let resolveLoad
+  let loads = 0
+  const module = createLiveTavernViewModule({
+    load: function () {
+      loads += 1
+      if (loads === 1) return new Promise(function (resolve) { resolveLoad = resolve })
+      return Promise.resolve({ view: { busy: false, marker: loads } })
+    },
+    shouldPoll(view) { return view && view.busy === true },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-3', function () {})
+  const first = timers.runNext()
+  module.invalidate('session-3')
+  module.invalidate('session-3')
+  resolveLoad({ view: { busy: false, marker: 1 } })
+  await first
+
+  assert.deepEqual(timers.activeDelays(), [0])
+  await timers.runNext()
+  assert.equal(loads, 2)
+  assert.equal(module.getSnapshot('session-3').view.marker, 2)
+  stop()
+})
+
+test('结算轮询请求悬挂时按时取消，并继续轮询直到完成', async function () {
+  const timers = fakeTimers()
+  let loads = 0
+  let aborted = false
+  const module = createLiveTavernViewModule({
+    loadTimeoutMs: 2000,
+    load: async function (_sessionId, request) {
+      loads += 1
+      if (loads === 1) return { view: { busy: true } }
+      if (loads === 2) {
+        return await new Promise(function (_resolve, reject) {
+          request.signal.addEventListener('abort', function () {
+            aborted = true
+            reject(new Error('aborted'))
+          })
+        })
+      }
+      return { view: { busy: false } }
+    },
+    shouldPoll(view) { return view && view.busy === true },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-stalled', function () {})
+
+  await timers.runNext()
+  assert.deepEqual(timers.activeDelays(), [200])
+  await timers.runNext()
+  assert.deepEqual(timers.activeDelays(), [2000])
+  await timers.runNext()
+  assert.equal(aborted, true)
+  assert.equal(module.getSnapshot('session-stalled').error, '')
+  assert.deepEqual(timers.activeDelays(), [300])
+  await timers.runNext()
+
+  assert.equal(loads, 3)
+  assert.equal(module.getSnapshot('session-stalled').view.busy, false)
+  assert.deepEqual(timers.activeDelays(), [])
+  stop()
+})
+
+test('状态请求超时后较长退避，避免服务端旧请求未结束时再次堆积', async function () {
+  const timers = fakeTimers()
+  const module = createLiveTavernViewModule({
+    loadTimeoutMs: 2000,
+    timeoutRetryDelayMs: 5000,
+    load: async function (_sessionId, request) {
+      return await new Promise(function (_resolve, reject) {
+        request.signal.addEventListener('abort', function () { reject(new Error('aborted')) })
+      })
+    },
+    shouldPoll() { return false },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-timeout-backoff', function () {})
+
+  await timers.runNext()
+  assert.deepEqual(timers.activeDelays(), [2000])
+  await timers.runNext()
+
+  assert.equal(module.getSnapshot('session-timeout-backoff').phase, 'retrying')
+  assert.deepEqual(timers.activeDelays(), [5000])
+  stop()
+})
+
+test('候选 Agent 长时间生成时状态查询只在内部重试，不产生超时错误', async function () {
+  const timers = fakeTimers()
+  let generating = false
+  let loads = 0
+  const module = createLiveTavernViewModule({
+    loadTimeoutMs: 2000,
+    load: async function (_sessionId, request) {
+      loads += 1
+      if (!generating) return { view: { busy: false } }
+      return await new Promise(function (_resolve, reject) {
+        request.signal.addEventListener('abort', function () { reject(new Error('aborted')) })
+      })
+    },
+    shouldPoll(view) { return view && view.busy === true },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-generating', function () {})
+
+  await timers.runNext()
+  generating = true
+  module.invalidate('session-generating')
+  await timers.runNext()
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    await timers.runNext()
+    assert.equal(module.getSnapshot('session-generating').phase, 'retrying')
+    assert.equal(module.getSnapshot('session-generating').error, '')
+    assert.deepEqual(timers.activeDelays(), [1500])
+    if (cycle < 2) await timers.runNext()
+  }
+
+  generating = false
+  await timers.runNext()
+  assert.equal(loads, 5)
+  assert.equal(module.getSnapshot('session-generating').phase, 'ready')
+  assert.equal(module.getSnapshot('session-generating').view.busy, false)
+  assert.equal(module.getSnapshot('session-generating').error, '')
+  stop()
+})
+
+test('人物卡删除后的状态错误进入不可用终态，不再自动重试并重复弹错', async function () {
+  const timers = fakeTimers()
+  let loads = 0
+  const module = createLiveTavernViewModule({
+    load: async function () { loads += 1; throw new Error('人物卡不存在: cards/Erin.json') },
+    shouldPoll() { return false },
+    isTerminalError(error) { return /人物卡不存在:/.test(String(error && error.message || error || '')) },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('deleted-card-session', function () {})
+
+  await timers.runNext()
+  const snapshot = module.getSnapshot('deleted-card-session')
+  const delays = timers.activeDelays()
+  stop()
+
+  assert.equal(loads, 1)
+  assert.equal(snapshot.phase, 'unavailable')
+  assert.match(snapshot.error, /人物卡不存在: cards\/Erin\.json/)
+  assert.deepEqual(delays, [])
+})
+
+test('协调快照空闲时保持低频探测，发现 Session 失联后切换为快速探测', async function () {
+  const timers = fakeTimers()
+  const snapshots = [
+    { liveSession: true, activity: { busy: false } },
+    { liveSession: false, activity: { busy: false } }
+  ]
+  const module = createLiveTavernViewModule({
+    load: async function () { return { view: snapshots.shift() } },
+    shouldPoll(view) { return !view || view.liveSession === false || (view.activity && view.activity.busy === true) },
+    idlePollIntervalMs: 2000,
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-coordination', function () {})
+
+  await timers.runNext()
+  assert.deepEqual(timers.activeDelays(), [2000])
+  await timers.runNext()
+  assert.equal(module.getSnapshot('session-coordination').view.liveSession, false)
+  assert.deepEqual(timers.activeDelays(), [200])
+  stop()
+})
+
+test('协调快照首次请求永久挂起时会超时并继续下一次权威探测', async function () {
+  const timers = fakeTimers()
+  let loads = 0
+  const module = createLiveTavernViewModule({
+    loadTimeoutMs: 2000,
+    idlePollIntervalMs: 2000,
+    load: async function () {
+      loads += 1
+      if (loads === 1) return await new Promise(function () {})
+      return { view: { liveSession: true, activity: { busy: false } } }
+    },
+    shouldPoll(view) { return !view || view.liveSession === false || (view.activity && view.activity.busy === true) },
+    schedule: timers.schedule,
+    cancel: timers.cancel
+  })
+  const stop = module.subscribe('session-lost-response', function () {})
+
+  await timers.runNext()
+  assert.deepEqual(timers.activeDelays(), [2000])
+  await timers.runNext()
+  assert.equal(module.getSnapshot('session-lost-response').phase, 'retrying')
+  assert.deepEqual(timers.activeDelays(), [300])
+  await timers.runNext()
+  assert.equal(loads, 2)
+  assert.equal(module.getSnapshot('session-lost-response').view.liveSession, true)
+  assert.deepEqual(timers.activeDelays(), [2000])
+  stop()
+})

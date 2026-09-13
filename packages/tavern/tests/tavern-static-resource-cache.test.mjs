@@ -1,0 +1,169 @@
+import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+
+import {
+  createTavernStaticResourceCache,
+  normalizeCacheableResourceUrl,
+  projectCachedResourceBody
+} from '../tavern-plugin/lib/domain/tavern-static-resource-cache.js'
+
+function response(body, mediaType, url) {
+  const bytes = Buffer.from(body)
+  return {
+    ok: true,
+    status: 200,
+    url,
+    headers: { get: function (name) { return String(name).toLowerCase() === 'content-type' ? mediaType : (String(name).toLowerCase() === 'content-length' ? String(bytes.length) : null) } },
+    arrayBuffer: async function () { return bytes }
+  }
+}
+
+test('静态资源首次下载后持久复用且保持二进制内容', async function (t) {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-tavern-static-cache-'))
+  t.after(async function () { await rm(rootDir, { recursive: true, force: true }) })
+  const url = 'https://assets.example.test/cg/scene.png'
+  const bytes = Buffer.from([0, 1, 2, 255, 128])
+  let requests = 0
+  const online = createTavernStaticResourceCache({
+    rootDir,
+    fetch: async function () { requests++; return response(bytes, 'image/png', url) }
+  })
+  const first = await online.get(url)
+  assert.equal(first.cache, 'miss')
+  assert.deepEqual(first.body, bytes)
+  assert.equal(requests, 1)
+
+  const offline = createTavernStaticResourceCache({ rootDir, fetch: async function () { throw new Error('不应访问网络') } })
+  const second = await offline.get(url)
+  assert.equal(second.cache, 'hit')
+  assert.deepEqual(second.body, bytes)
+})
+
+test('缓存的 ESM、CSS 和 HTML 子资源继续改写到本地缓存入口', function () {
+  const moduleBody = projectCachedResourceBody({
+    url: 'https://cdn.example.test/pkg/main.js',
+    mediaType: 'application/javascript',
+    body: Buffer.from('import x from "/dep.js"; import("https://other.example/a.js")')
+  }).toString('utf8')
+  assert.match(moduleBody, /static-assets\?url=https%3A%2F%2Fcdn\.example\.test%2Fdep\.js/)
+  assert.match(moduleBody, /static-assets\?url=https%3A%2F%2Fother\.example%2Fa\.js/)
+
+  const cssBody = projectCachedResourceBody({
+    url: 'https://cdn.example.test/css/all.min.css',
+    mediaType: 'text/css',
+    body: Buffer.from('@import url(theme/base.css); @import "../shared/tokens.css"; @font-face{src:url(../webfonts/icons.woff2)}')
+  }).toString('utf8')
+  assert.match(cssBody, /static-assets\?url=https%3A%2F%2Fcdn\.example\.test%2Fcss%2Ftheme%2Fbase\.css/)
+  assert.match(cssBody, /static-assets\?url=https%3A%2F%2Fcdn\.example\.test%2Fshared%2Ftokens\.css/)
+  assert.match(cssBody, /static-assets\?url=https%3A%2F%2Fcdn\.example\.test%2Fwebfonts%2Ficons\.woff2/)
+
+  const htmlBody = projectCachedResourceBody({
+    url: 'https://cards.example.test/ui/index.html',
+    mediaType: 'text/plain',
+    body: Buffer.from('<link href="/ui.css"><img src="https://img.example/cg.png"><a href="https://example.org">原链接</a>')
+  }).toString('utf8')
+  assert.match(htmlBody, /static-assets\?url=https%3A%2F%2Fcards\.example\.test%2Fui\.css/)
+  assert.match(htmlBody, /static-assets\?url=https%3A%2F%2Fimg\.example%2Fcg\.png/)
+  assert.match(htmlBody, /<a href="https:\/\/example\.org">/)
+})
+
+test('HTML 资源改写不会把脚本中的 readAsDataURL 当成 CSS url', function () {
+  const htmlBody = projectCachedResourceBody({
+    url: 'https://cards.example.test/ui/index.html',
+    mediaType: 'text/html',
+    body: Buffer.from([
+      '<script type="module">',
+      'import value from "/dep.js";',
+      'const reader = new FileReader(); reader.readAsDataURL(value);',
+      '</script>',
+      '<script src="/app.js"></script>',
+      '<style>.hero{background:url(./scene.png)}</style>',
+      '<div style="background:url(https://img.example/card.png)"></div>'
+    ].join(''))
+  }).toString('utf8')
+
+  assert.match(htmlBody, /reader\.readAsDataURL\(value\)/)
+  assert.match(htmlBody, /static-assets\?url=https%3A%2F%2Fcards\.example\.test%2Fdep\.js/)
+  assert.match(htmlBody, /static-assets\?url=https%3A%2F%2Fcards\.example\.test%2Fapp\.js/)
+  assert.match(htmlBody, /static-assets\?url=https%3A%2F%2Fcards\.example\.test%2Fui%2Fscene\.png/)
+  assert.match(htmlBody, /static-assets\?url=https%3A%2F%2Fimg\.example%2Fcard\.png/)
+  assert.doesNotMatch(htmlBody, /readAsDataURL\(\/api\/dsh-tavern\/static-assets/)
+})
+
+test('缓存 HTML 的不带引号子资源地址也进入本地缓存', function () {
+  const html = projectCachedResourceBody({
+    url: 'https://assets.example/page.html', mediaType: 'text/html',
+    body: Buffer.from('<img src=https://assets.example/image.png width=30% /><video poster=/poster.png></video><script src=https://assets.example/app.js></script><link rel=stylesheet href=https://assets.example/style.css><a href=https://example.com/page>跳转</a><div data-src=https://assets.example/lazy.png></div>')
+  }).toString('utf8')
+  for (const name of ['image.png', 'poster.png', 'app.js', 'style.css']) {
+    assert.ok(html.includes('/api/dsh-tavern/static-assets?url=' + encodeURIComponent('https://assets.example/' + name)), name)
+  }
+  assert.ok(html.includes('width=30% />'))
+  assert.ok(html.includes('<a href=https://example.com/page>'))
+  assert.ok(html.includes('data-src=https://assets.example/lazy.png'))
+})
+
+test('静态缓存允许本机、内网与 Fake-IP 地址，仍要求 HTTPS 且不携带凭据', function () {
+  assert.throws(() => normalizeCacheableResourceUrl('http://example.com/a.js'), /HTTPS/)
+  assert.throws(() => normalizeCacheableResourceUrl('https://user:password@localhost/a.js'), /凭据/)
+  for (const host of ['localhost', 'device.local', '127.0.0.1', '10.0.0.1', '192.168.1.2', '[::1]', '[fdfe:dcba:9876::52]', '[fd00::1]', '[fe80::1]']) {
+    assert.equal(normalizeCacheableResourceUrl('https://' + host + '/a.js'), 'https://' + host + '/a.js')
+  }
+})
+
+test('默认下载链路不预先拒绝 DNS 或私网地址，重定向后仍可加载', async t => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-tavern-private-cache-'))
+  t.after(() => rm(rootDir, {recursive:true, force:true}))
+  const calls = [], originalFetch = globalThis.fetch
+  let cache
+  try {
+    globalThis.fetch = async url => {
+      calls.push(url)
+      if (url === 'https://cdn.invalid/module.js') return {status:302,headers:{get:()=> 'https://[fdfe:dcba:9876::52]/module.js'}}
+      return response('export const ready=true;', 'application/javascript', url)
+    }
+    // Use the production default fetch path: no test-only DNS verifier bypass.
+    cache = createTavernStaticResourceCache({rootDir})
+  } finally { globalThis.fetch = originalFetch }
+  const result = await cache.get('https://cdn.invalid/module.js')
+  assert.match(result.body.toString(), /ready=true/)
+  assert.deepEqual(calls, ['https://cdn.invalid/module.js', 'https://[fdfe:dcba:9876::52]/module.js'])
+  await cache.get('https://192.168.1.2/module.js')
+  assert.equal(calls.at(-1), 'https://192.168.1.2/module.js')
+})
+
+test('超出单文件上限或不支持的响应不会写入缓存', async function (t) {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-tavern-static-cache-limit-'))
+  t.after(async function () { await rm(rootDir, { recursive: true, force: true }) })
+  const oversized = createTavernStaticResourceCache({ rootDir, maxEntryBytes: 4, fetch: async function (url) { return response('12345', 'image/png', url) } })
+  await assert.rejects(oversized.get('https://assets.example.test/large.png'), /上限/)
+  const unsupported = createTavernStaticResourceCache({ rootDir, fetch: async function (url) { return response('zip', 'application/zip', url) } })
+  await assert.rejects(unsupported.get('https://assets.example.test/archive.zip'), /不支持/)
+})
+
+test('下载前校验每一跳主机且只接受有限 HTTPS 重定向', async function (t) {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-tavern-static-cache-redirect-'))
+  t.after(async function () { await rm(rootDir, { recursive: true, force: true }) })
+  const verified = []
+  const cache = createTavernStaticResourceCache({
+    rootDir,
+    verifyHostname: async function (url) { verified.push(url) },
+    fetch: async function (url) {
+      if (url === 'https://assets.example.test/start') return { ok: false, status: 302, headers: { get: function (name) { return String(name).toLowerCase() === 'location' ? 'https://cdn.example.test/final.png' : null } } }
+      return response('image', 'image/png', url)
+    }
+  })
+  assert.equal((await cache.get('https://assets.example.test/start')).finalUrl, 'https://cdn.example.test/final.png')
+  assert.deepEqual(verified, ['https://assets.example.test/start', 'https://cdn.example.test/final.png'])
+})
+
+test('缓存 HTML 中的媒体保留原生远端地址，支持相对视频源', () => {
+  const html = projectCachedResourceBody({ url: 'https://cards.example/ui/home.html', mediaType: 'text/html', body: Buffer.from('<video src="/movie.mp4" poster="/cover.png"><source src="https://media.example/live"></video><audio src="https://media.example/bgm.mp3"></audio>') }).toString()
+  assert.match(html, /src="https:\/\/cards.example\/movie.mp4"/)
+  assert.match(html, /src="https:\/\/media.example\/live"/)
+  assert.match(html, /src="https:\/\/media.example\/bgm.mp3"/)
+  assert.ok(html.includes('/api/dsh-tavern/static-assets?url=' + encodeURIComponent('https://cards.example/cover.png')))
+})
