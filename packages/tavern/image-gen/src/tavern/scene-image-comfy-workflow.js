@@ -4,6 +4,8 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const safeKey = value => typeof value === 'string' && /^[\w.:-]{1,120}$/.test(value) && !['__proto__', 'constructor', 'prototype'].includes(value)
 const fail = message => { throw new Error('ComfyUI 工作流：' + message) }
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+// The Qwen text-encoder family keeps its text in `prompt`; every other encoder uses `text`.
+const textInput = node => node?.class_type === 'CLIPTextEncode' ? 'text' : /^TextEncodeQwenImage/.test(node?.class_type) ? 'prompt' : undefined
 
 function samplerSeedBinding(prompt, id) {
   const node = prompt[id], input = node.class_type === 'KSampler' ? 'seed' : 'noise_seed'
@@ -46,7 +48,10 @@ export function comfyWorkflow(value) {
   }
   let outputNode = wrapped ? value.outputNode : undefined
   if (!wrapped) {
-    const outputs = entries.filter(([, node]) => node.class_type === 'SaveImage')
+    // A preview-only graph is a valid single-image template: ComfyUI keeps its output
+    // in temp instead of output, which the download path already accepts.
+    const saved = entries.filter(([, node]) => node.class_type === 'SaveImage')
+    const outputs = saved.length ? saved : entries.filter(([, node]) => node.class_type === 'PreviewImage')
     if (outputs.length !== 1) fail('无法确定唯一图片输出，请维护者提供映射文件')
     outputNode = outputs[0][0]
   }
@@ -70,9 +75,16 @@ export function comfyWorkflow(value) {
     const samplers = [...reachable].filter(id => ['KSampler', 'KSamplerAdvanced'].includes(prompt[id].class_type))
     if (samplers.length !== 1) fail('无法自动识别采样节点，请维护者提供映射文件')
     const id = samplers[0], node = prompt[id], positive = node.inputs.positive, negative = node.inputs.negative
-    if (!Array.isArray(positive) || prompt[positive[0]]?.class_type !== 'CLIPTextEncode' || typeof prompt[positive[0]].inputs.text !== 'string' || positive[0] === negative?.[0]) fail('无法区分正负提示词，请维护者提供映射文件')
-    bindings = { positive: [{ node: positive[0], input: 'text' }], seed: [samplerSeedBinding(prompt, id)], batch: [] }
-    if (Array.isArray(negative) && prompt[negative[0]]?.class_type === 'CLIPTextEncode' && typeof prompt[negative[0]].inputs.text === 'string') bindings.negative = [{ node: negative[0], input: 'text' }]
+    // Qwen-Image 2.x emits positive, negative and latent from a single encoder node, so a
+    // shared node is legitimate there — its negative lives in a separate text input.
+    const shared = Array.isArray(positive) && Array.isArray(negative) && positive[0] === negative[0]
+    const positiveField = Array.isArray(positive) ? textInput(prompt[positive[0]]) : undefined
+    const negativeField = Array.isArray(negative)
+      ? (shared ? (prompt[negative[0]]?.class_type === 'TextEncodeQwenImage21' ? 'negative_prompt' : undefined) : textInput(prompt[negative[0]]))
+      : undefined
+    if (!positiveField || typeof prompt[positive[0]].inputs[positiveField] !== 'string' || (shared && !negativeField)) fail('无法区分正负提示词，请维护者提供映射文件')
+    bindings = { positive: [{ node: positive[0], input: positiveField }], seed: [samplerSeedBinding(prompt, id)], batch: [] }
+    if (negativeField && typeof prompt[negative[0]].inputs[negativeField] === 'string') bindings.negative = [{ node: negative[0], input: negativeField }]
     if (Number.isSafeInteger(node.inputs.steps)) bindings.steps = [{ node: id, input: 'steps' }]
     if (typeof node.inputs.cfg === 'number' && Number.isFinite(node.inputs.cfg)) bindings.guidance = [{ node: id, input: 'cfg' }]
   }
@@ -114,7 +126,14 @@ export function compileComfyWorkflow(workflow, text, options = {}) {
     if (!config.bindings[binding]?.length) fail('缺少 ' + binding + ' 映射')
     for (const item of config.bindings[binding]) prompt[item.node].inputs[item.input] = field === 'negativePrompt' ? options[field] : Number(options[field])
   }
-  for (const item of config.bindings.positive) prompt[item.node].inputs[item.input] = text
+  for (const item of config.bindings.positive) {
+    // A template keeps whatever the author wrote around the placeholder — the identity and
+    // photographic rules of a saved graph must survive every generated scene.
+    const template = prompt[item.node].inputs[item.input]
+    const composed = template.includes('%prompt%') || template.includes('{{prompt}}') ? template.replace(/%prompt%|\{\{prompt\}\}/g, () => text) : text
+    if (composed.length > 16000) fail('节点 ' + item.node + ' 的组合提示词过长')
+    prompt[item.node].inputs[item.input] = composed
+  }
   for (const item of config.bindings.seed) prompt[item.node].inputs[item.input] = seed
   for (const item of config.bindings.batch) prompt[item.node].inputs[item.input] = 1
   for (const node of Object.values(prompt)) if (Object.hasOwn(node.inputs, 'batch_size')) {

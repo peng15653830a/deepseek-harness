@@ -72,12 +72,34 @@ export function channelReady(config, hasKey) {
   if (config.provider === 'dsh-image-gen') return config.pluginReady === true
   return Boolean(config.baseURL && (config.provider === 'comfyui' ? config.workflow : config.provider === 'webui' || config.model) && (!channelNeedsKey(config) || hasKey) && (config.authType !== 'basic' || config.username))
 }
+/** The whole Qwen text-encoder family shares the prose contract: Edit Plus and Image 2.x. */
+function qwenEditWorkflow(config) {
+  return config.provider === 'comfyui' && config.workflow?.bindings?.positive?.some(binding => /^TextEncodeQwenImage/.test(config.workflow.prompt[binding.node]?.class_type))
+}
+/** Reference images already wired into the workflow, not images Tavern uploads per request. */
+function qwenWorkflowReferences(config) {
+  const nodes = config.workflow?.prompt || {}
+  for (const binding of config.workflow?.bindings?.positive || []) {
+    const inputs = nodes[binding.node]?.inputs || {}
+    const count = Object.keys(inputs).filter(key => /^image/i.test(key) && Array.isArray(inputs[key])).length
+    if (count) return count
+  }
+  return 0
+}
 export function imageExpressionProfile(config) {
-  if (config.provider === 'comfyui') return 'scene-tags-v1:comfyui:' + (config.workflow?.digest || 'unconfigured')
+  if (config.provider === 'comfyui') return (qwenEditWorkflow(config) ? 'scene-prose-v1:comfyui:' : 'scene-tags-v1:comfyui:') + (config.workflow?.digest || 'unconfigured')
   // Preserve old OpenAI plans while isolating other protocol/model expressions.
   return config.provider === 'openai' || !config.provider ? 'scene-tags-v1:' + config.model : 'scene-tags-v1:' + config.provider + ':' + (config.model || 'server-default')
 }
 export function imageExpressionGuidance(config) {
+  if (qwenEditWorkflow(config)) {
+    const references = qwenWorkflowReferences(config)
+    return 'Qwen Image Edit 工作流：tags 使用简洁、可拼接的中文自然语言短句，不写英文关键词串，不使用 1girl 这类标签。每幅图只表现同一时刻成立的一个瞬间，不写过程、先后或结果递进；只写镜头里看得见的内容，把情绪落成姿态、表情、视线和光线；本图人物是画面主体且要清晰可辨，不用影子、空镜、虚焦局部或环境细节替代人物。'
+      + (references
+        ? '工作流已内置 ' + references + ' 张参考图承载人物身份：不要重写五官长相，只保留必要的辨识特征和本轮变化（如湿发、伤痕、衣饰），也不按参考图数量推断画面人数。'
+        : '工作流没有内置参考图：用文字写清人物的外貌与辨识特征。')
+      + '衣着、动作、表情、位置以当前剧情为准，外貌只写资料里有依据的部分。environment 写地点与有依据的照明，composition 写景别、视角和主体焦点；关键画面必须写进 tags，不能只写在 text 或 description。工作流已有固定提示词前缀和独立风格，不要在人物块里重复 RAW photo、8k、masterpiece 或风格词。仍使用本次任务提供的草稿与确认工具。'
+  }
   if (config.provider !== 'novelai') return undefined
   return 'NovelAI：tags 优先用简洁英文绘图标签，必要关系用短英文句子。人物外貌、服装、动作、表情、位置只放各自的人物块，不在 scene 中重写。scene 只放人数、环境、镜头和关系；人数与性别须有依据，不猜测。V4/V4.5/V5 会分开提交角色描述，人数标签如 2girls 放 scene，单个人物只写 girl/boy/other，不写 1girl，不使用 | 人物分隔语法。保留稳定身份与事实，只转换表达。'
 }
