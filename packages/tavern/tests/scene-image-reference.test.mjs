@@ -97,3 +97,15 @@ test('multi-person image requires explicit stable identity and revokes each pers
   await f.bind({ version, personId: 'bob', enabled: false })
   assert.deepEqual((await f.select()).records.map(record => record.person.id), ['alice'])
 })
+
+test('reference lookup derives only recorded source and activation turns, and skips empty histories', async () => {
+  const f = fixture()
+  let reads = 0
+  const lineage = turns => { reads++; assert.deepEqual([...turns].sort(), [1, 2]); return [f.source, f.activation] }
+  assert.deepEqual((await f.select({ lineage })).active, [])
+  assert.equal(reads, 0)
+  await f.bind()
+  assert.equal((await f.select({ lineage })).records.length, 1)
+  assert.equal(reads, 1)
+  assert.equal((await f.select({ lineage: () => [f.source] })).active.length, 0, 'missing activation is not authorized')
+})

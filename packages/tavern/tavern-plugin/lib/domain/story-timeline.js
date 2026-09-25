@@ -19,7 +19,7 @@ function sameBasedOn(left, right) {
 }
 
 function participantRole(role) {
-  return role === 'candidate' || role === 'settlement' ? 'background' : role
+  return role === 'candidate' || role === 'settlement' || role === 'character-design' || role === 'worldbook-filter' ? 'background' : role
 }
 
 function participantLifetime(value) {
@@ -107,6 +107,9 @@ export function createStoryTimeline(options = {}) {
       presentation: chat.presentation === undefined ? null : chat.presentation,
       presentationWarnings: Array.isArray(chat.presentationWarnings) ? chat.presentationWarnings : [],
       macroState: chat.macroState === undefined ? null : chat.macroState,
+      variables: chat.variables,
+      tavernPluginMetadata: chat.tavernPluginMetadata,
+      tavernHelperScriptVariables: chat.tavernHelperScriptVariables,
       tavernScriptPrompts: chat.tavernScriptPrompts || [],
       runtimeInputs: chat.runtimeInputs === undefined ? null : chat.runtimeInputs,
       posture: str(chat.posture),
@@ -129,6 +132,12 @@ export function createStoryTimeline(options = {}) {
     chat.presentation = clone(source.presentation === undefined ? null : source.presentation)
     chat.presentationWarnings = clone(Array.isArray(source.presentationWarnings) ? source.presentationWarnings : [])
     if (Object.hasOwn(source, 'macroState')) chat.macroState = clone(source.macroState)
+    // These chat-local values belong to the story, unlike model/UI settings.
+    // Absence in the historical state must also remove values created later.
+    for (const key of ['variables', 'tavernPluginMetadata', 'tavernHelperScriptVariables']) {
+      if (Object.hasOwn(source, key)) chat[key] = clone(source[key])
+      else delete chat[key]
+    }
     if (Object.hasOwn(source, 'runtimeInputs')) chat.runtimeInputs = clone(source.runtimeInputs)
     chat.tavernScriptPrompts = clone(source.tavernScriptPrompts || [])
     chat.posture = str(source.posture)
@@ -245,7 +254,7 @@ export function createStoryTimeline(options = {}) {
     if (current.status === 'current' && current.branchId === chat.timeline.branchId && str(current.sessionId) !== '') {
       return { role: participantKey, sessionId: current.sessionId, rewindTo: null, lifetime: participantLifetime(current.lifetime), syncedRevision: current.syncedRevision }
     }
-    if (bound && ['running', 'interrupted', 'failed', 'deferred'].includes(bound.status)) return { role: participantKey, sessionId: bound.startedSessionId, rewindTo: null, lifetime: 'chat', syncedRevision: null }
+    if (current.status !== 'needs-rewind' && bound && ['running', 'interrupted', 'failed', 'deferred'].includes(bound.status)) return { role: participantKey, sessionId: bound.startedSessionId, rewindTo: null, lifetime: 'chat', syncedRevision: null }
     const rewindTo = Number.isSafeInteger(current.rewindTo) ? current.rewindTo : (Number.isSafeInteger(current.boundary) ? current.boundary : null)
     return {
       role: participantKey,
@@ -256,18 +265,27 @@ export function createStoryTimeline(options = {}) {
     }
   }
 
-  function commitParticipant(chat, operation, value) {
-    const participant = object(value)
+  function commitParticipant(chat, operation, value, preserveRewind = false) {
+    let participant = object(value)
+    // The identity durably bound before execution outranks a caller's stale
+    // pre-replacement receipt. Never transfer a boundary between sessions.
+    if (operation.startedSessionId && operation.startedSessionId !== str(participant.sessionId)) {
+      participant = { sessionId: operation.startedSessionId, lifetime: 'chat', boundary: null, identityOnly: true }
+    }
     if (operation.kind !== 'agent' || str(participant.sessionId) === '') return
     const lifetime = participantLifetime(participant.lifetime)
     const participantKey = participantRole(operation.role)
     const previousParticipant = object(chat.timeline.participants[participantKey])
+    // Failure is not evidence that the requested rewind reached durable storage.
+    // Keep the original boundary so every retry still has to perform it.
+    if (preserveRewind && previousParticipant.status === 'needs-rewind'
+      && previousParticipant.sessionId === participant.sessionId) return
     const nextParticipant = {
       role: participantKey,
       lifetime,
       sessionId: str(participant.sessionId),
       branchId: chat.timeline.branchId,
-      syncedRevision: chat.timeline.revision,
+      syncedRevision: participant.identityOnly ? null : chat.timeline.revision,
       boundary: Number.isSafeInteger(participant.boundary) ? participant.boundary : null,
       status: 'current',
       rewindTo: null,
@@ -347,15 +365,24 @@ export function createStoryTimeline(options = {}) {
     return Object.assign(operationValue(operation, participantRequest(chat, role)), { created: true })
   }
 
-  function recoverBackground(chat) {
+  function recoverBackground(chat, intent = {}) {
     let interruptedRole = ''
     let changed = false
     for (const operation of Object.values(chat.timeline.operations)) {
-      if (operation.kind !== 'agent' || operation.status !== 'running') continue
-      operation.status = 'interrupted'
+      if (operation.kind !== 'agent' || (operation.status !== 'running'
+        && !(intent.cancelDelivery === true && operation.role === 'settlement' && operation.status === 'deferred'))) continue
+      const target = (chat.messages || []).findLast(message => message.role === 'assistant')
+      const delivery = target?.mvu?.pending ? target.mvu.delivery : null
+      const recoverable = intent.cancelDelivery !== true && operation.role === 'settlement' && delivery?.version === 1
+        && delivery.branchId === operation.basedOn?.branchId && delivery.revision === operation.basedOn?.revision
+        && delivery.swipeId === Number(target.swipeId || 0) && delivery.branchId === chat.timeline.branchId
+        && delivery.revision === chat.timeline.revision
+        && delivery.lifecycleRevision === Number(chat.tavernHelperLifecycleRevision || 0)
+      operation.status = recoverable ? 'deferred' : 'interrupted'
+      if (recoverable) updateSettlementBackground(chat, operation, 'pending')
       operation.completedAt = now()
       changed = true
-      if (operation.role === 'settlement') interruptedRole = operation.role
+      if (operation.role === 'settlement' && !recoverable) interruptedRole = operation.role
     }
     const background = backgroundBody(chat)
     if (background !== undefined) {
@@ -363,8 +390,8 @@ export function createStoryTimeline(options = {}) {
         return operation.kind === 'agent' && operation.role === 'settlement' &&
           operation.roundOperationId === background.id
       }).sort(function (left, right) { return Number(right.createdAt) - Number(left.createdAt) })[0]
-      // A deferred operation has not executed its saved submission and can resume
-      // when the browser returns. An interrupted/unqueued round cannot claim that.
+      // Deferred work has either an uncommitted isolated draft or a persisted
+      // effect. Both can resume without applying the same variable change twice.
       // Also repair chats already converted to pending by older recovery code.
       const orphaned = background.status === 'completed' &&
         ['pending', 'running'].includes(background.background.phase) && latest?.status !== 'deferred'
@@ -476,6 +503,27 @@ export function createStoryTimeline(options = {}) {
       chat.timeline.revision++
       chat.timeline.updatedAt = now()
       chat.candidates = null
+      // Prose is authoritative. The previous settlement must not overrule the
+      // edited scene in foreground requests or in the resident background Agent.
+      chat.posture = ''
+      chat.lastSettle = null
+      chat.settleStatus = 'idle'
+      chat.settleError = null
+      const checkpoint = chat.timeline.checkpoints.at(-1)
+      for (const [role, participant] of Object.entries(chat.timeline.participants)) {
+        if (!persistentParticipant(participant.lifetime)) continue
+        const previous = object(checkpoint?.participants?.[role])
+        const source = participantCheckpointSource(previous)
+        const needsSession = participant.requiresNewSessionOnRewind === true || !str(participant.sessionId)
+        const boundary = source?.sessionId === participant.sessionId ? source.boundary : -1
+        chat.timeline.participants[role] = {
+          ...participant, status: needsSession ? 'needs-session' : 'needs-rewind',
+          sessionId: needsSession ? '' : participant.sessionId,
+          boundary: needsSession ? null : boundary, rewindTo: needsSession ? null : boundary,
+          syncedRevision: null, updatedAt: now()
+        }
+      }
+      chat.candidateAgent = null
       value = { status: 'edited', revision: chat.timeline.revision }
     }
     else if (intent.kind === 'body.begin') value = beginBody(chat, intent)
@@ -486,13 +534,31 @@ export function createStoryTimeline(options = {}) {
         || operation.basedOn.branchId !== chat.timeline.branchId || operation.basedOn.revision !== chat.timeline.revision) throw new Error('后台任务已过期，不能绑定代理')
       if (!str(intent.sessionId)) throw new Error('后台代理编号为空')
       operation.startedSessionId = str(intent.sessionId)
+      const key = participantRole(operation.role)
+      const previous = object(chat.timeline.participants[key])
+      if (str(previous.sessionId) !== operation.startedSessionId) {
+        // Session ownership is durable before the model runs; task success and
+        // synchronization are separate facts. Old checkpoints remain untouched.
+        chat.timeline.participants[key] = {
+          role: key, lifetime: 'chat', sessionId: operation.startedSessionId,
+          branchId: chat.timeline.branchId, status: 'bound', syncedRevision: null,
+          boundary: null, rewindTo: null, updatedAt: now()
+        }
+      }
       value = { status: 'bound' }
     }
-    else if (intent.kind === 'background.recover') value = recoverBackground(chat)
+    else if (intent.kind === 'background.recover') value = recoverBackground(chat, intent)
     else if (intent.kind === 'turn.rollback') value = rollback(chat, intent)
     else if (intent.kind === 'replacement.abort') {
       const currentRevision = chat.timeline.revision
-      chat = ensure(intent.restoreChat)
+      const original = ensure(intent.restoreChat)
+      // Roll back story-owned fields, not settings saved while the model ran.
+      restore(chat, snapshot(original))
+      chat.timeline = clone(original.timeline)
+      for (const key of ['nativeCommits', 'suppressedDshTurns', 'regeneratedDshTurns']) {
+        if (Object.hasOwn(original, key)) chat[key] = clone(original[key])
+        else delete chat[key]
+      }
       const branchId = makeId('branch')
       const participants = {}
       for (const role of Object.keys(chat.timeline.participants)) {
@@ -540,7 +606,7 @@ export function createStoryTimeline(options = {}) {
       return { chat, value: { status: 'deferred', branchId: chat.timeline.branchId, revision: chat.timeline.revision } }
     }
     if (outcome.status !== 'success') {
-      commitParticipant(chat, operation, outcome.participant)
+      commitParticipant(chat, operation, outcome.participant, true)
       operation.status = 'failed'
       operation.completedAt = now()
       if (operation.kind === 'agent' && operation.role === 'settlement') updateSettlementBackground(chat, operation, 'failed')

@@ -1,3 +1,4 @@
+import { zipText } from './fixtures/zip-text.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createTavernApiDiagnostics } from '../tavern-plugin/lib/domain/tavern-api-diagnostics.js'
@@ -47,6 +48,6 @@ test('结算事件错配归为拒绝，诊断包携带调用记录', async () =>
   const apiDiagnostics = await d.read('session')
   assert.equal(apiDiagnostics.records[0].status, 'rejected')
   const exported = await createMvuDiagnosticExport({ sessionId: 'session', apiDiagnostics, store: { async read() { return { records: [] } } } })
-  assert.match(exported.buffer.toString(), /compatibility\/api-calls.json/)
-  assert.match(exported.buffer.toString(), /MVU_SETTLEMENT_EVENT_MISMATCH/)
+  assert.match(zipText(exported.buffer), /compatibility\/api-calls.json/)
+  assert.match(zipText(exported.buffer), /MVU_SETTLEMENT_EVENT_MISMATCH/)
 })

@@ -163,6 +163,18 @@ export function createBackgroundTaskCoordinator(options = {}) {
           kind: 'agent.bind', operationId: begun.value.operationId, sessionId
         } }).chat, { source: 'background.' + str(role) + '.bind', operationId: begun.value.operationId }))
       },
+      async checkpoint(apply) {
+        const saved = await serialize(chatId, () => store.updateChat(chatId, latest => {
+          const state = timeline.inspect({ chat: latest })
+          const operation = state.operations[begun.value.operationId]
+          if (operation?.status !== 'running' || state.branchId !== begun.value.basedOn.branchId
+            || state.revision !== begun.value.basedOn.revision) throw new Error('后台任务保存点已过期')
+          apply(latest)
+          return latest
+        }, { source: 'background.' + str(role) + '.checkpoint', operationId: begun.value.operationId }))
+        if (!saved) throw new Error('后台任务对话已不存在，保存点未写入')
+        return saved
+      },
       async commit(input = {}) {
         return await serialize(begun.chat.id, async function () {
           let status = 'missing'
@@ -207,7 +219,7 @@ export function createBackgroundTaskCoordinator(options = {}) {
       if (options.operationId && activity(source).operationId !== options.operationId) {
         return { chat: source, status: 'stale', activity: activity(source) }
       }
-      const next = timeline.apply({ chat: source, intent: { kind: 'background.recover' } })
+      const next = timeline.apply({ chat: source, intent: { kind: 'background.recover', cancelDelivery: Boolean(options.operationId) } })
       if (next.value.status !== 'unchanged') await store.writeChat(next.chat, { source: 'background.recover' })
       return { chat: next.chat, status: next.value.status, activity: activity(next.chat) }
     })

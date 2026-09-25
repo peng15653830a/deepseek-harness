@@ -1,3 +1,4 @@
+import { appendSessionEvent } from '../tavern-plugin/lib/domain/session-events.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
@@ -20,10 +21,10 @@ async function harness(t) {
   return { ctx, Session }
 }
 const source = { kind: 'model', provider: 'fixture', model: 'text' }
-function completed(session) {
+function completed(session, usage) {
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 1 })
-  const e = session.append('assistant/message', { turn: 1, step: 1, message: { id: 'body', role: 'assistant', content: [{ type: 'text', text: 'Story '.repeat(1000) }], source } }, { surfaceOp: 'append' })
+  const e = appendSessionEvent(session, 'assistant/message', { turn: 1, step: 1, ...(usage ? {usage} : {}), message: { id: 'body', role: 'assistant', content: [{ type: 'text', text: 'Story '.repeat(1000) }], source } }, { surfaceOp: 'append' })
   session.append('step/end', { turn: 1, step: 1 })
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   return e
@@ -39,7 +40,7 @@ test('原生 Token Meter 可统计既有无 step 的 Tavern 种子消息，且�
   t.after(dispose)
   const measured = ctx.tokenMeter.measure(session)
   assert.ok(measured.totalTokens > 0)
-  assert.equal(measured.nodes.length, 3)
+  assert.equal(measured.nodes.length, session.header.version >= 3 ? 4 : 3)
   assert.equal(JSON.stringify(session.snapshotEvents()), before)
 })
 
@@ -49,7 +50,7 @@ test('原生 Token Meter 在闭合回合后统计后台回退和正文替换', n
   completed(session)
   const before = ctx.tokenMeter.measure(session).totalTokens
   const seq = session.surface.nodes[0]
-  session.append('assistant/message', { turn: 1, step: 1, message: { id: 'replacement', role: 'assistant', content: [], source } }, { surfaceOp: { op: 'replace', startSeq: seq, end: seq }, sourceEventSeqs: [seq] })
+  appendSessionEvent(session, 'assistant/message', { turn: 1, step: 1, message: { id: 'replacement', role: 'assistant', content: [], source } }, { surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq] })
   assert.throws(() => ctx.tokenMeter.measure(session), /assistant\/message.*no matching step\/start/)
   t.after(installTavernTokenMeter(ctx.tokenMeter))
   assert.ok(ctx.tokenMeter.measure(session).totalTokens < before)
@@ -59,12 +60,12 @@ test('适配不放过真实模型回复缺步骤或其他预设历史', native, 
   const { ctx, Session } = await harness(t)
   t.after(installTavernTokenMeter(ctx.tokenMeter))
   const session = Session.create('bad-model')
-  session.append('assistant/message', { turn: 1, step: 1, message: { id: 'real', role: 'assistant', content: [], source } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'assistant/message', { turn: 1, step: 1, message: { id: 'real', role: 'assistant', content: [], source } }, { surfaceOp: 'append' })
   assert.throws(() => ctx.tokenMeter.measure(session), /no matching step\/start/)
   const other = Session.create('other')
   completed(other)
   const seq = other.surface.nodes[0]
-  other.append('assistant/message', { turn: 1, step: 1, message: { id: 'unknown-replace', role: 'assistant', content: [], source } }, { surfaceOp: { op: 'replace', startSeq: seq, end: seq }, sourceEventSeqs: [seq] })
+  appendSessionEvent(other, 'assistant/message', { turn: 1, step: 1, message: { id: 'unknown-replace', role: 'assistant', content: [], source } }, { surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq] })
   assert.throws(() => ctx.tokenMeter.measure(other), /no matching step\/start/)
 })
 
@@ -84,7 +85,7 @@ test('原生手动压缩可处理种子和后台替换，压缩后仍能计量�
     completed(session)
     if (preset === 'tavern-background') {
       const seq = session.surface.nodes[0]
-      session.append('assistant/message', { turn: 1, step: 1, message: { id: 'edited-body', role: 'assistant', content: [{ type: 'text', text: 'Updated story '.repeat(1000) }], source } }, { surfaceOp: { op: 'replace', startSeq: seq, end: seq }, sourceEventSeqs: [seq] })
+      appendSessionEvent(session, 'assistant/message', { turn: 1, step: 1, message: { id: 'edited-body', role: 'assistant', content: [{ type: 'text', text: 'Updated story '.repeat(1000) }], source } }, { surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq] })
     }
     session.append('user/message', { id: 'latest', role: 'user', content: [{ type: 'text', text: '继续' }], source: { kind: 'human' } }, { surfaceOp: 'append' })
     const before = ctx.tokenMeter.measure(session).totalTokens
@@ -108,8 +109,9 @@ test('前后台固定系统背景连续压缩三次仍不变，原事件和恢�
   class FixtureCompaction extends BasicCompactionEngine {
     async summarize(input) {
       calls++
-      assert.equal(input.system, fixed)
-      assert.ok(input.messages.every(message => !JSON.stringify(message.content).includes('固定人物形象')))
+      const systemText = input.system ?? input.messages.filter(m => m.role === 'system').map(m => m.content.map(b => b.text || '').join('')).join('\n')
+      assert.equal(systemText, fixed)
+      assert.ok(input.messages.filter(m => m.role !== 'system').every(message => !JSON.stringify(message.content).includes('固定人物形象')))
       return { summary: [{ type: 'text', text: '剧情摘要。' }], provider: 'fixture', model: 'summary', maxTokens: 128 }
     }
   }
@@ -118,14 +120,19 @@ test('前后台固定系统背景连续压缩三次仍不变，原事件和恢�
     const session = ctx.sessions.create('fixed-' + preset, { meta: { agentPreset: preset } })
     await ensureSessionStablePrefix(session, fixed)
     const system = sessionStablePrefixSections(session).map(s => s.text).join('\n')
-    session.append('request/header', { header: { config: { provider: 'fixture', model: 'summary' }, system }, reason: 'initial' })
+    session.append('request/header', { header: { config: { provider: 'fixture', model: 'summary' }, ...(session.header.version < 3 ? { system } : {}) }, reason: 'initial' })
+    if (session.header.version >= 3) {
+      const head = session.surface.nodes[0]
+      session.append('system/message', { message: { id: 'assembled', role: 'system', content: [{ type: 'text', text: system }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' } } }, { surfaceOp: { op: 'replace', startSeq: head, endSeq: head }, sourceEventSeqs: [head] })
+    }
     for (let n = 0; n < 3; n++) {
       session.append('user/message', { id: 'history-' + n, role: 'user', content: [{ type: 'text', text: '剧情进展。'.repeat(500) }], source: { kind: 'user' } }, { surfaceOp: 'append' })
       session.append('user/message', { id: 'tail-' + n, role: 'user', content: [{ type: 'text', text: '最新剧情' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
       const original = session.snapshotEvents()
       const signal = new AbortController().signal
       assert.ok(await engine.compactNow({ session, options: {}, runMaintenance: fn => fn(signal) }, signal))
-      assert.equal(session.requestHeader().system, fixed)
+      if (session.header.version < 3) assert.equal(session.requestHeader().system, fixed)
+      else assert.equal(session.deriveEventMessage(session.eventAt(session.surface.nodes[0])).content[0].text, fixed)
       assert.deepEqual(session.snapshotEvents().slice(0, original.length), original)
       const restored = Session.create(session.id, session.snapshotEvents(), session.header)
       assert.equal(sessionStablePrefixSections(restored).map(s => s.text).join('\n'), fixed)
@@ -134,4 +141,87 @@ test('前后台固定系统背景连续压缩三次仍不变，原事件和恢�
     }
   }
   assert.equal(calls, 6)
+})
+
+
+test('standard 标识的酒馆旧会话仍可计量正文替换，不改历史', native, async t => {
+  const {ctx, Session} = await harness(t)
+  const session = Session.create('legacy-standard', [], {...Session.create('legacy-standard').header, agentPreset: 'standard'})
+  session.append('agent-preset/selected', {agentPreset: 'tavern'})
+  await ensureSessionSeedTrajectory(session)
+  const original = completed(session)
+  appendSessionEvent(session, 'assistant/message', {turn: 1, step: 1, message: {id: 'filtered', role: 'assistant', content: [{type: 'text', text: '处理后正文'}], source}}, {surfaceOp: {op: 'replace', start: original.seq, end: original.seq}, sourceEventSeqs: [original.seq]})
+  const events = JSON.stringify(session.snapshotEvents())
+  t.after(installTavernTokenMeter(ctx.tokenMeter))
+  assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
+  assert.equal(JSON.stringify(session.snapshotEvents()), events)
+})
+
+
+test('带明确来源的正文替换不依赖预设名，保持 assistant 角色', native, async t => {
+  const {ctx, Session} = await harness(t)
+  const session = Session.create('explicit-projection')
+  const original = completed(session)
+  appendSessionEvent(session, 'assistant/message', {turn: 1, step: 1, message: {id: 'projection', role: 'assistant', content: [{type: 'text', text: '正文'}], source: {kind: 'model', provider: 'dsh-tavern', model: 'reply-projection'}}}, {surfaceOp: {op: 'replace', start: original.seq, end: original.seq}, sourceEventSeqs: [original.seq]})
+  t.after(installTavernTokenMeter(ctx.tokenMeter))
+  assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
+  assert.equal(session.snapshotEvents().at(-1).data.message.role, 'assistant')
+})
+
+
+test('撤销回退恢复带 usage 的模型正文后仍可统计，历史和用量不重写', native, async t => {
+  const {restoreSurface} = await import('../tavern-plugin/lib/domain/surface-restoration.js')
+  const {ctx, Session} = await harness(t)
+  const session = Session.create('undo-meter', [], {...Session.create('undo-meter').header, agentPreset: 'tavern'})
+  const original = completed(session, {inputTokens: 100, outputTokens: 50, totalTokens: 150})
+  const target = [...session.surface.nodes]
+  appendSessionEvent(session, 'assistant/message', {turn: 1, step: 1, message: {id: 'rollback', role: 'assistant', content: [], source}}, {surfaceOp: {op: 'replace', start: original.seq, end: original.seq}, sourceEventSeqs: [original.seq]})
+  restoreSurface(session, target)
+  const before = JSON.stringify(session.snapshotEvents())
+  t.after(installTavernTokenMeter(ctx.tokenMeter))
+  assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
+  assert.equal(JSON.stringify(session.snapshotEvents()), before)
+})
+
+
+test('后续切换预设不改变旧替换的归属，伪造恢复内容仍被拒绝', native, async t => {
+  const {ctx, Session} = await harness(t)
+  const session = Session.create('switch-after-edit')
+  session.append('agent-preset/selected', {agentPreset: 'tavern'})
+  const original = completed(session)
+  const edit = appendSessionEvent(session, 'assistant/message', {turn: 1, step: 1, message: {id: 'edit', role: 'assistant', content: [], source}}, {surfaceOp: {op: 'replace', start: original.seq, end: original.seq}, sourceEventSeqs: [original.seq]})
+  session.append('agent-preset/selected', {agentPreset: 'standard'})
+  t.after(installTavernTokenMeter(ctx.tokenMeter))
+  assert.doesNotThrow(() => ctx.tokenMeter.measure(session))
+  session.append('agent-preset/selected', {agentPreset: 'tavern'})
+  appendSessionEvent(session, 'assistant/message', {...original.data, message: {...original.data.message, content: [{type: 'text', text: '不是原文'}]}}, {surfaceOp: {op: 'replace', start: edit.seq, end: edit.seq}, sourceEventSeqs: [edit.seq, original.seq]})
+  assert.throws(() => ctx.tokenMeter.measure(session), /no matching step\/start/)
+})
+
+test('多次编辑产生非递增 Surface 序号后，替换历史仍可原生计量', native, async t => {
+  const { ctx, Session } = await harness(t)
+  const { replaceSessionSurface } = await import('../tavern-plugin/lib/domain/session-surface-mutations.js')
+  const session = ctx.sessions.create('edited-order', { meta: { agentPreset: 'tavern' } })
+  const first = completed(session)
+  const tail = session.append('user/message', { id: 'tail', role: 'user', content: [{type:'text',text:'继续'}], source:{kind:'human'} }, {surfaceOp:'append'})
+  const edit = replaceSessionSurface(session, 'assistant/message', {turn:1,step:1,message:{id:'first-edit',role:'assistant',content:[{type:'text',text:'修订正文'}],source}}, {start:first.seq,end:first.seq,sourceEventSeqs:[first.seq]})
+  assert.ok(edit.seq > tail.seq)
+  replaceSessionSurface(session, 'assistant/message', {turn:1,step:1,message:{id:'second-edit',role:'assistant',content:[{type:'text',text:'再次修订'}],source}}, {start:edit.seq,end:tail.seq,sourceEventSeqs:[edit.seq,tail.seq]})
+  t.after(installTavernTokenMeter(ctx.tokenMeter))
+  const before = JSON.stringify(session.snapshotEvents())
+  assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
+  assert.equal(JSON.stringify(session.snapshotEvents()), before)
+  session.append('user/message', {id:'history',role:'user',content:[{type:'text',text:'剧情进展。'.repeat(1000)}],source:{kind:'human'}}, {surfaceOp:'append'})
+  session.append('user/message', {id:'latest',role:'user',content:[{type:'text',text:'继续'}],source:{kind:'human'}}, {surfaceOp:'append'})
+  const { BasicCompactionEngine } = await import(new URL('../../dsh-compaction-basic/lib/index.js', pathToFileURL(process.env.DSH_BOOT_MODULE)))
+  let calls=0
+  class FixtureCompaction extends BasicCompactionEngine {
+    async summarize() {calls++;return {summary:[{type:'text',text:'剧情摘要。'}],provider:'fixture',model:'summary',maxTokens:128}}
+  }
+  const engine=new FixtureCompaction(ctx,{auto:false}),signal=new AbortController().signal
+  const original=session.snapshotEvents()
+  assert.ok(await engine.compactNow({session,options:{},runMaintenance:fn=>fn(signal)},signal))
+  assert.equal(calls,1)
+  assert.doesNotThrow(()=>ctx.tokenMeter.measure(session))
+  assert.deepEqual(session.snapshotEvents().slice(0,original.length),original)
 })

@@ -1,4 +1,7 @@
-import { sessionEvents } from './session-events.js'
+import { isRescuedHistoryMessage } from './chat-history-rescue.js'
+import { replaceSessionSurface } from './session-surface-mutations.js'
+import { restoredSurfaceSeqs } from './surface-restoration.js'
+import { sessionEvents, appendSessionEvent, surfaceReplacementRange } from './session-events.js'
 import { randomUUID } from 'node:crypto'
 
 function object(value) {
@@ -16,6 +19,12 @@ function modelSourceOf(event) {
   const message = object(data && data.message)
   const source = object(message && message.source)
   return source && source.kind === 'model' ? source : null
+}
+
+function isForegroundContext(event) {
+  const source = event?.type === 'user/message' && event.data?.source
+  return source?.kind === 'plugin' && source.plugin === 'dsh-tavern' &&
+    ['foreground-frame', 'worldbook-snapshot', 'snapshot'].includes(source.form)
 }
 
 function isRollbackUserTombstone(event) {
@@ -68,6 +77,36 @@ export function abortedRegenerationTurns(input) {
   return modelTurns(events, seqs)
 }
 
+// The native rollback may consume a failed-turn cleanup tombstone rather than
+// its original streamed assistant node. Follow that provenance to hide the
+// interrupted turn too; stopping alone must retain its visible error/partial reply.
+export function rolledBackSurfaceTurns(events) {
+  const restored = restoredSurfaceSeqs(events)
+  const bySeq = new Map(events.filter(event => Number.isSafeInteger(event?.seq)).map(event => [event.seq, event]))
+  const turns = new Set()
+  const visited = new Set()
+  function visit(seq) {
+    if (visited.has(seq)) return
+    visited.add(seq)
+    const event = bySeq.get(seq)
+    if (!event) return
+    const turn = Number(event.data?.turn)
+    if (event.type === 'assistant/message' && modelSourceOf(event) !== null && Number.isSafeInteger(turn) && turn > 0) turns.add(turn)
+    if (event.surfaceOp?.op === 'replace') for (const source of event.sourceEventSeqs || []) visit(source)
+  }
+  for (const event of events) {
+    if (restored.has(event.seq) || !isRollbackAssistantTombstone(event, events)) continue
+    for (const seq of event.sourceEventSeqs || []) visit(seq)
+  }
+  return [...turns].sort((left, right) => left - right)
+}
+
+export function foregroundSuppressedTurns(chat, events) {
+  return Array.from(new Set((Array.isArray(chat?.suppressedDshTurns) ? chat.suppressedDshTurns : [])
+    .concat(abortedRegenerationTurns({ events }), rolledBackSurfaceTurns(events))
+    .map(Number).filter(turn => Number.isSafeInteger(turn) && turn > 0))).sort((left, right) => left - right)
+}
+
 // Legacy regeneration left a durable empty replacement at the saved story turn.
 // Surface replacement hides messages, not DSH's turn/end error nodes. Derive
 // their display suppression without changing the immutable event history.
@@ -90,14 +129,14 @@ export function supersededRegenerationErrorTurns(input) {
     if (event.type !== 'assistant/message' || modelSourceOf(event) === null || !op || op.op !== 'replace') continue
     const content = event.data.message.content
     if (!Array.isArray(content) || content.length !== 0) continue
-    const body = bySeq.get(op.end)
+    const body = bySeq.get(surfaceReplacementRange(op).end)
     const turn = Number(body && body.data && body.data.turn)
     const end = endings.get(turn)
     if (!body || body.type !== 'assistant/message' || modelSourceOf(body) === null || !syntheticTurns.has(turn) || turn === Number(event.data.turn)) continue
     if (!end || end.seq <= body.seq || end.seq >= event.seq || end.data.reason.kind !== 'completed') continue
     if (!Array.isArray(body.data.message.content) || !body.data.message.content.some(block => block.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '')) continue
     for (const failure of failures) {
-      if (failure.seq >= op.start && failure.seq <= op.end) hidden.add(Number(failure.data.turn))
+      if (failure.seq >= surfaceReplacementRange(op).start && failure.seq <= surfaceReplacementRange(op).end) hidden.add(Number(failure.data.turn))
     }
   }
   return [...hidden].sort((a, b) => a - b)
@@ -120,15 +159,48 @@ export function locateRegenerationSurface(input) {
   return null
 }
 
+// Failed turns have already left the model surface, but remain visible until
+// the user explicitly clears them. Never consume a committed story to do that.
+export function pendingFailedSurfaceTurns({ events = [], nodes = [], suppressed = [] }) {
+  const hidden = new Set(suppressed.map(Number))
+  const turns = new Set()
+  for (let index = nodes.length - 1; index >= 0; index--) {
+    const event = eventAt(events, nodes[index])
+    // A later successful turn may already have been rolled back. Its empty
+    // marker and legacy context snapshots do not end the pending failure tail.
+    if (isRollbackAssistantTombstone(event, events) || isForegroundContext(event)) continue
+    if (!isRollbackUserTombstone(event)) break
+    if (event.data.source.plugin !== 'dsh-tavern-failed-turn-cleanup') continue
+    const sources = event.sourceEventSeqs || []
+    const failed = new Set(modelTurns(events, sources))
+    // A provider can fail before emitting any assistant message. Recover the
+    // turn from the cleaned nodes' enclosing lifecycle, including old records.
+    let started = null
+    for (const candidate of events) {
+      if (candidate?.type === 'turn/start') started = candidate
+      if (candidate?.type !== 'turn/end' || !started) continue
+      if (Number(candidate.data?.turn) === Number(started.data?.turn) &&
+          ['error', 'aborted'].includes(candidate.data?.reason?.kind) &&
+          sources.some(seq => seq > started.seq && seq < candidate.seq)) {
+        failed.add(Number(candidate.data.turn))
+      }
+      started = null
+    }
+    for (const turn of failed) {
+      if (Number.isSafeInteger(turn) && turn > 0 && !hidden.has(turn)) turns.add(turn)
+    }
+  }
+  return [...turns].sort((a, b) => a - b)
+}
+
 export function locateRollbackSurface(input) {
   const events = Array.isArray(input && input.events) ? input.events : []
   const nodes = Array.isArray(input && input.nodes) ? input.nodes : []
   let userIndex = -1
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAt(events, nodes[index])
-    const source = event?.data?.source
-    const isFrame = source?.kind === 'plugin' && source.plugin === 'dsh-tavern' && source.form === 'foreground-frame'
-    if (event && event.type === 'user/message' && !isFrame && !isRollbackUserTombstone(event)) {
+    if (event?.type === 'user/message' && event.data?.source?.kind === 'plugin' && ['compact', 'dsh-compaction-basic'].includes(event.data.source.plugin)) return null
+    if (event && event.type === 'user/message' && !isForegroundContext(event) && !isRollbackUserTombstone(event)) {
       userIndex = index
       break
     }
@@ -208,11 +280,24 @@ export function planFailedTurnSurface(input) {
   }
   if (startSeq < 0 || endSeq <= startSeq) return null
 
+  // Retiring an older frame writes a new event at its historical surface
+  // position. That empty replacement belongs to the old context, not this
+  // failed attempt; including it would span a previously committed reply.
+  function isRetiredHistoricalFrame(seq) {
+    const event = eventAt(events, seq)
+    if (!isForegroundContext(event) || event.data.source.form !== 'foreground-frame' ||
+      !Array.isArray(event.data.content) || event.data.content.length !== 0 || event.surfaceOp?.op !== 'replace') return false
+    const range = surfaceReplacementRange(event.surfaceOp)
+    return Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) &&
+      range.start < startSeq && range.end < startSeq
+  }
+
   let firstIndex = -1
   let lastIndex = -1
   for (let index = 0; index < nodes.length; index += 1) {
     const seq = Number(nodes[index])
     if (seq <= startSeq || seq >= endSeq) continue
+    if (isRetiredHistoricalFrame(seq)) continue
     if (firstIndex < 0) firstIndex = index
     lastIndex = index
   }
@@ -240,15 +325,12 @@ export function clearFailedTurnSurface(input) {
   const makeId = typeof input.id === 'function' ? input.id : function () { return randomUUID() }
   // DSH permits plugin-injected user messages, but assistant messages must be
   // model-sourced on restore. Keep this empty tombstone explicitly plugin-owned.
-  session.append('user/message', {
+  replaceSessionSurface(session, 'user/message', {
     id: makeId(),
     role: 'user',
     content: [],
     source: { kind: 'plugin', plugin: 'dsh-tavern-failed-turn-cleanup' }
-  }, {
-    surfaceOp: { op: 'replace', start: cleanup.start, end: cleanup.end },
-    sourceEventSeqs: cleanup.shadowedSeqs
-  })
+  }, { start: cleanup.start, end: cleanup.end, sourceEventSeqs: cleanup.shadowedSeqs })
   return cleanup.shadowedSeqs.length
 }
 
@@ -258,7 +340,22 @@ export function clearRegenerationAttemptSurface(input) {
   if (!session || typeof session.append !== 'function') return 0
   const nodes = session.surface && Array.isArray(session.surface.nodes) ? session.surface.nodes : []
   const eventStart = Math.max(0, Number(input && input.eventStart) || 0)
-  const temporary = nodes.filter(function (seq) { return Number(seq) >= eventStart }).map(Number)
+  const events = sessionEvents(session)
+  // A replacement has a new seq but keeps its historical position. Ownership
+  // follows displaced nodes; event time alone cannot identify temporary input.
+  const end = events.find(event => event.seq >= eventStart && (event.type === 'turn/end' ||
+    (event.type === 'user/message' && event.data?.source?.kind === 'user')))?.seq ?? Infinity
+  const owned = new Set()
+  for (const event of events) {
+    if (event.seq < eventStart) continue
+    if (event.surfaceOp?.op === 'replace') {
+      const refs = event.sourceEventSeqs
+      if (Array.isArray(refs) && refs.length > 0 && refs.every(seq => owned.has(seq))) owned.add(event.seq)
+    } else if (event.seq < end && event.surfaceOp === 'append') {
+      owned.add(event.seq)
+    }
+  }
+  const temporary = nodes.filter(seq => owned.has(Number(seq))).map(Number)
   if (temporary.length === 0) return 0
   const firstIndex = nodes.indexOf(temporary[0])
   const lastIndex = nodes.indexOf(temporary[temporary.length - 1])
@@ -266,15 +363,12 @@ export function clearRegenerationAttemptSurface(input) {
     throw new Error('重新生成临时消息不是连续区间，无法安全清理')
   }
   const makeId = typeof input.id === 'function' ? input.id : function () { return randomUUID() }
-  session.append('user/message', {
+  replaceSessionSurface(session, 'user/message', {
     id: makeId(),
     role: 'user',
     content: [],
     source: { kind: 'plugin', plugin: 'dsh-tavern-regeneration-abort' }
-  }, {
-    surfaceOp: { op: 'replace', start: temporary[0], end: temporary[temporary.length - 1] },
-    sourceEventSeqs: temporary
-  })
+  }, { start: temporary[0], end: temporary[temporary.length - 1], sourceEventSeqs: temporary })
   return temporary.length
 }
 
@@ -287,4 +381,59 @@ export function hasRollbackMessages(messages) {
     return user !== null && user.role === 'user'
   }
   return false
+}
+
+// Recover only ended, uncommitted failures still present at the surface tail.
+// A missing cleanup hook must not turn an interrupted input into a dead end.
+function unclearedFailedTail(chat, events, nodes) {
+  const tail = nodes.findLast(seq => {
+    const event = eventAt(events, seq)
+    return !isRollbackAssistantTombstone(event, events) && !isRollbackUserTombstone(event) && !isForegroundContext(event)
+  })
+  if (tail === undefined) return []
+  const latest = (chat.messages || []).findLast(message => message?.role === 'assistant')
+  const lastEvent = eventAt(events, tail)
+  if (lastEvent?.type === 'assistant/message' && (Number(lastEvent.data?.turn) === Number(latest?.turn) || Number(lastEvent.data?.turn) === Number(chat.regeneratedDshTurns?.[String(latest?.turn)]))) return []
+  const committed = new Set((chat.messages || []).filter(message => message?.role === 'assistant').map(message => Number(message.turn)))
+  for (const turn of Object.values(chat.regeneratedDshTurns || {})) committed.add(Number(turn))
+  const starts = new Map(), intervals = []
+  for (const event of events) {
+    const turn = Number(event.data?.turn)
+    if (event.type === 'turn/start') starts.set(turn, event.seq)
+    if (event.type === 'turn/end' && starts.has(turn)) {
+      intervals.push({ turn, start: starts.get(turn), end: event.seq, failed: ['error', 'aborted'].includes(event.data?.reason?.kind) })
+      starts.delete(turn)
+    }
+  }
+  let remaining = [...nodes]
+  const result = []
+  while (remaining.length) {
+    const event = eventAt(events, remaining.at(-1))
+    if (isRollbackAssistantTombstone(event, events) || isRollbackUserTombstone(event) || isForegroundContext(event)) { remaining.pop(); continue }
+    const interval = intervals.findLast(item => event && event.seq > item.start && event.seq < item.end)
+    if (!interval?.failed || committed.has(interval.turn)) break
+    const plan = planFailedTurnSurface({ events, nodes: remaining, turn: interval.turn })
+    if (!plan) break
+    result.push(interval.turn)
+    const removed = new Set(plan.shadowedSeqs)
+    remaining = remaining.filter(seq => !removed.has(seq))
+  }
+  return result
+}
+
+// UI and mutation share the same native target and failed-tail precedence.
+export function rollbackAvailability(chat, { events = [], nodes = [] } = {}) {
+  const unclearedTurns = unclearedFailedTail(chat, events, nodes)
+  const failedTurns = [...new Set([...pendingFailedSurfaceTurns({ events, nodes, suppressed: chat.suppressedDshTurns || [] }), ...unclearedTurns])].sort((a, b) => a - b)
+  if (failedTurns.length) return { canRollback: true, canClearIncompleteReply: true, failedTurns, unclearedTurns, target: null, reason: '' }
+  const target = locateRollbackSurface({ events, nodes })
+  const messages = Array.isArray(chat.messages) ? chat.messages : []
+  const latest = messages.findLast(message => message?.role === 'assistant' && message.greeting !== true)
+  if (isRescuedHistoryMessage(chat, latest)) return { canRollback: false, canClearIncompleteReply: false, failedTurns, target: null, reason: '存档救援导入的历史不可回退，请发送新消息继续' }
+  const turn = Number(latest?.turn)
+  const matches = target && (!(turn > 0) || target.turn === turn || target.turn === Number(chat.regeneratedDshTurns?.[String(turn)]))
+  const hasMessages = hasRollbackMessages(messages)
+  const canRollback = hasMessages && Boolean(matches)
+  return { canRollback, canClearIncompleteReply: false, failedTurns, target: canRollback ? target : null,
+    reason: canRollback ? '' : hasMessages ? '当前轮次已不在可回退的消息流中，请继续发送新消息；历史正文仍保留。' : '当前没有可回退的已提交轮次' }
 }

@@ -1,4 +1,5 @@
-import { sessionEvents } from './session-events.js'
+import { replaceSessionSurface } from './session-surface-mutations.js'
+import { ensureSessionSystemHead, sessionEvents, appendSessionEvent } from './session-events.js'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createDurableFilePromotion } from '../durable-file-promotion.js'
@@ -66,14 +67,17 @@ function sourceSections(text) {
 /** Read the immutable snapshot from original events, even after its Surface node was compacted. */
 export function readSessionStablePrefix(session) {
   if (!session) return null
-  let legacy = null
+  let legacy = null, fixed = null
   for (const event of sessionEvents(session)) {
     const record = messageRecord(event)
     if (!record) continue
-    if (typeof record.message.source.fixedSystemText === 'string') return record
+    if (typeof record.message.source.fixedSystemText === 'string') {
+      if (!fixed || Number(record.message.source.cardContextRevision || 0) > Number(fixed.message.source.cardContextRevision || 0)) fixed = record
+      continue
+    }
     legacy ||= record
   }
-  return legacy
+  return fixed || legacy
 }
 
 function legacyEventText(session) {
@@ -97,8 +101,15 @@ function fixedContextMessage(session, text) {
 }
 
 /** Persist fixed system text in native snapshot metadata; empty content cannot become summary material. */
-export async function ensureSessionStablePrefix(session, text, storage) {
+export async function ensureSessionStablePrefix(session, text, storage, revision = 0) {
+  ensureSessionSystemHead(session)
   const existing = readSessionStablePrefix(session)
+  if (existing && revision > Number(existing.message.source.cardContextRevision || 0) && str(text).trim()) {
+    const message = fixedContextMessage(session, str(text).trim())
+    message.id += ':revision-' + revision
+    message.source.cardContextRevision = revision
+    return messageRecord(appendSessionEvent(session, 'user/message', message, { surfaceOp: 'append' }))
+  }
   if (existing) {
     const activeLegacy = sessionEvents(session).find(event => messageRecord(event)?.message.content.length && session.surface?.nodes.includes(event.seq))
     const needsSnapshot = typeof existing.message.source.fixedSystemText !== 'string'
@@ -107,9 +118,9 @@ export async function ensureSessionStablePrefix(session, text, storage) {
       // Freeze that same evaluated snapshot once when migrating, never reevaluate per turn.
       const context = needsSnapshot && /<%[\s\S]*?%>/.test(existing.text) && str(text).trim() ? str(text).trim() : existing.text
       const message = { ...fixedContextMessage(session, context), id: 'tavern-session-prefix:' + session.id + ':system-migration' }
-      const event = session.append('user/message', message, activeLegacy ? {
-        surfaceOp: { op: 'replace', start: activeLegacy.seq, end: activeLegacy.seq }, sourceEventSeqs: [activeLegacy.seq]
-      } : { surfaceOp: 'append' })
+      const event = activeLegacy
+        ? replaceSessionSurface(session, 'user/message', message, { start: activeLegacy.seq, end: activeLegacy.seq, sourceEventSeqs: [activeLegacy.seq] })
+        : appendSessionEvent(session, 'user/message', message, { surfaceOp: 'append' })
       return messageRecord(event)
     }
     return existing
@@ -118,10 +129,11 @@ export async function ensureSessionStablePrefix(session, text, storage) {
   if (pending.has(session)) return pending.get(session)
   const operation = (async function () {
     const saved = storage ? await storage.read(session.id) : null
-    const context = legacyEventText(session) || str(saved && saved.text).trim() || str(text).trim()
+    const context = (revision > 0 ? str(text).trim() : '') || legacyEventText(session) || str(saved && saved.text).trim() || str(text).trim()
     if (context === '') return null
     const message = fixedContextMessage(session, context)
-    const event = session.append('user/message', message, { surfaceOp: 'append' })
+    if (revision > 0) message.source.cardContextRevision = revision
+    const event = appendSessionEvent(session, 'user/message', message, { surfaceOp: 'append' })
     return messageRecord(event)
   })()
   pending.set(session, operation)

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { normalizeResourcePath } from './file-resources.js'
 import { inspectPreset, nativeRegexScriptsOf } from './preset-reading.js'
 import { previewPresetConversion } from './preset-conversion-preview.js'
@@ -21,6 +22,7 @@ export function createPresetLibrary({ resources: fileResources, state: profileDa
     const inspected = inspectPreset(text, normalized)
     const conversion = previewPresetConversion(text, normalized)
     return Object.assign({
+      revision: createHash('sha256').update(text).digest('hex'),
       path: normalized,
       previewPath: fileResources.absolute(normalized),
       dshPreset: conversion && conversion.dshPreset || null,
@@ -183,6 +185,7 @@ export function createPresetLibrary({ resources: fileResources, state: profileDa
     for (const record of inspectedPresets) {
       const presetPath = record.path
       const inspected = record.inspected
+      if (!inspected) continue // A listed file may disappear before it is read.
       const preset = inspected
       const extractableRegexScripts = runtimeRegexScriptsOf(preset, await readPresetDocument(preset.path))
       const phaseCounts = Object.fromEntries(['front', 'middle', 'back'].map(function (phase) {
@@ -248,6 +251,10 @@ export function createPresetLibrary({ resources: fileResources, state: profileDa
     await presetEditor.updateEntry(path, key, patch)
     return await readPreset(path)
   }
+  async function moveEntry(path, key, phase, beforeKey, revision) {
+    await presetEditor.moveEntry(path, key, phase, beforeKey, revision)
+    return await detail(path)
+  }
   async function updateRegex(path, key, patch) {
     const normalized = normalizeResourcePath(path, 'preset')
     await presetEditor.updateRegex(normalized, key, patch)
@@ -260,6 +267,6 @@ export function createPresetLibrary({ resources: fileResources, state: profileDa
   }
   return Object.freeze({ read: readPreset, readDocument: readPresetDocument, detail,
     catalog, select, import: importPreset, export: exportPreset, preview: previewPreset,
-    updateEntry, updateRegex, migrate, migrateChat: migrateLegacyChatPreset,
+    updateEntry, updateRegex, moveEntry, migrate, migrateChat: migrateLegacyChatPreset,
     editor: presetEditor, runtime: runtimePresets, plans: bypassPlans })
 }

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { previewPresetConversion } from './preset-conversion-preview.js'
 import { inspectPreset } from './preset-reading.js'
 
 function str(value) {
@@ -103,7 +105,7 @@ export function createPresetEditor(options = {}) {
     if (text === undefined) throw new Error('预设不存在: ' + normalized)
     let document
     try { document = JSON.parse(text) } catch { throw new Error('预设工作版不是有效的 JSON: ' + normalized) }
-    return { normalized, document }
+    return { normalized, document, text }
   }
 
   async function read(path, request = {}) {
@@ -157,6 +159,30 @@ export function createPresetEditor(options = {}) {
     }
   }
 
+  async function moveEntry(path, entryKey, phase, beforeEntryKey, revision) {
+    const loaded = await load(path)
+    if (createHash('sha256').update(loaded.text).digest('hex') !== revision) throw new Error('预设已变化，请重新打开后再移动')
+    if (!['front', 'middle', 'back'].includes(phase)) throw new Error('无效的预设分段')
+    const inspected = inspectPreset(loaded.text, loaded.normalized)
+    const converted = previewPresetConversion(loaded.text, loaded.normalized)
+    const entry = inspected.entries.find(item => item.entryKey === entryKey)
+    const sourceIndex = entry?.sourcePromptIndex
+    const phases = converted.phases
+    const row = ['front', 'middle', 'back'].flatMap(key => phases?.[key] || []).find(item => item.sourceIndex === sourceIndex)
+    if (!row || row.type !== 'text') throw new Error('只能移动三段中的提示词条目')
+    const before = beforeEntryKey ? inspected.entries.find(item => item.entryKey === beforeEntryKey) : null
+    if (beforeEntryKey && (!before || !phases[phase].some(item => item.sourceIndex === before.sourcePromptIndex))) throw new Error('目标条目已变化，请重新打开预设')
+    if (beforeEntryKey === entryKey) return
+    for (const key of ['front', 'middle', 'back']) phases[key] = phases[key].filter(item => item !== row)
+    const index = before ? phases[phase].findIndex(item => item.sourceIndex === before.sourcePromptIndex) : phases[phase].length
+    phases[phase].splice(index, 0, row)
+    const layout = Object.fromEntries(['front', 'middle', 'back'].map(key => [key, phases[key].map(item => ({ sourceIndex: item.sourceIndex, identifier: item.identifier }))]))
+    const next = clone(loaded.document)
+    if (next.dsh_tavern !== undefined && (next.dsh_tavern === null || typeof next.dsh_tavern !== 'object' || Array.isArray(next.dsh_tavern))) throw new Error('预设 dsh_tavern 扩展格式无效')
+    next.dsh_tavern = { ...next.dsh_tavern, promptLayout: layout }
+    await writeText(loaded.normalized, JSON.stringify(next, null, 2))
+  }
+
   async function updateRegex(path, regexKey, patch) {
     if (typeof inspectRegexScripts !== 'function') throw new Error('Preset Editor 缺少正则编辑 adapter')
     const input = typeof patch === 'boolean' ? { enabled: patch } : (patch !== null && typeof patch === 'object' && !Array.isArray(patch) ? patch : {})
@@ -181,5 +207,5 @@ export function createPresetEditor(options = {}) {
     return await update(loaded.normalized, operations)
   }
 
-  return Object.freeze({ read, update, updateEntry, updateRegex })
+  return Object.freeze({ read, update, updateEntry, updateRegex, moveEntry })
 }

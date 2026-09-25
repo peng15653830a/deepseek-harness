@@ -268,6 +268,9 @@ test('剧本候选注入人物卡但排除文风示例，剧本块放在动态�
   assert.doesNotMatch(result.stableText, /多写动作|右手按着剑柄|两人沿石阶走近钟楼/)
   assert.match(result.dynamicText, /多写动作|右手按着剑柄|两人沿石阶走近钟楼/)
   assert.doesNotMatch(result.dynamicText, /剧本候选任务|名字: 阿芙拉|谨慎而直接|保持冷静/)
+  assert.ok(result.dynamicText.endsWith(result.candidateScriptWindow.text))
+  assert.deepEqual(result.candidateScriptWindow.positions, [2])
+  assert.match(result.candidateScriptWindow.text, /两人沿石阶走近钟楼/)
 })
 
 test('没有召回结果时，正文规划器不会回退读取人物卡内的世界书', async () => {
@@ -339,4 +342,22 @@ test('卡片工作台没有实际资料片段时不生成额外上下文', async
   assert.equal(result.text, '')
   assert.deepEqual(result.sections, [])
   assert.equal(result.audit.totalChars, 0)
+})
+
+test('关闭姿势结算后正文和候选不再注入旧姿势，重新开启和旧存档保持兼容', async () => {
+  const planner = createContextPlanner({ prompt })
+  for (const purpose of ['body', 'candidate']) {
+    const saved = chat()
+    const original = saved.posture
+    for (const enabled of [undefined, false, true]) {
+      saved.backgroundTasks = enabled === undefined ? undefined : { posture: enabled }
+      const result = await planner.plan({ purpose, card: card(), chat: saved, task: '生成候选', worldBookContext: '' })
+      assert.equal(result.sections.some(section => section.kind === 'posture'), enabled !== false)
+      if (enabled === false) {
+        assert.ok(!result.text.includes(original))
+        assert.ok(!result.text.includes('每轮结算更新，务必与之一致'))
+      }
+      assert.equal(saved.posture, original)
+    }
+  }
 })

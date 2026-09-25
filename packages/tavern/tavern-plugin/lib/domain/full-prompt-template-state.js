@@ -1,14 +1,15 @@
+import { applyTemplateStateChanges } from './template-state-patch.js'
 import { isDeepStrictEqual } from 'node:util'
-import { projectTavernHelperContext } from './tavern-helper-context.js'
+import { projectTavernHelperContext, replaceTavernHelperMessages } from './tavern-helper-context.js'
 import { assertPluginJson } from './tavern-chat-plugin-data.js'
 
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
 const fixedMessageFields = ['mes', 'is_user', 'is_system', 'name', 'swipe_id', 'swipes']
-const templateFields = ['variables_initialized', 'is_ejs_processed']
+const templateFields = ['variables_initialized', 'is_ejs_processed', 'template_display', 'template_rendered']
 
 /** Detached upstream-shaped state, not a second authoritative chat history. */
 export function projectFullPromptTemplateState(chat) {
-  const helper = projectTavernHelperContext(chat)
+  const helper = projectTavernHelperContext(chat.promptTemplateInput?.message ? {...chat,messages:[...chat.messages,chat.promptTemplateInput.message]} : chat)
   return {
     chatId: chat.id, sessionId: chat.sessionId,
     stateRevision: helper.stateRevision, lifecycleRevision: helper.lifecycleRevision,
@@ -67,12 +68,17 @@ export function applyFullPromptTemplateState(current, baseline, request) {
   const base = projectFullPromptTemplateState(baseline), latest = projectFullPromptTemplateState(current)
   if (request.chat.length !== base.chat.length || latest.chat.length !== base.chat.length) conflict('聊天楼层已变化，模板存档未保存')
   const next = structuredClone(current)
+  if (next.promptTemplateInput?.message) next.messages.push(next.promptTemplateInput.message)
   for (let index=0; index<base.chat.length; index++) {
     const before=base.chat[index], now=latest.chat[index], desired=request.chat[index]
     if (!isDeepStrictEqual(identity(before),identity(now))) conflict('聊天正文或 swipe 已变化，模板存档未保存')
-    if (!isDeepStrictEqual(identity(before),identity(desired))) {
-      const error=new Error('模板正文修改需要原生历史操作，不能通过变量存档提交')
-      error.code='PROMPT_TEMPLATE_HISTORY_UNSUPPORTED'; throw error
+    if (['is_user', 'is_system', 'name'].some(key => !isDeepStrictEqual(before[key], desired[key]))) conflict('模板不能修改消息身份')
+    if (!Array.isArray(desired.swipes) || !desired.swipes.length || desired.swipes.some(text => typeof text !== 'string') || !Number.isSafeInteger(desired.swipe_id) || desired.swipe_id < 0 || desired.swipe_id >= desired.swipes.length) conflict('模板回复版本无效')
+    if (before.mes !== desired.mes || !isDeepStrictEqual(before.swipes, desired.swipes) || before.swipe_id !== desired.swipe_id) {
+      next.messages[index].swipes = structuredClone(desired.swipes)
+      replaceTavernHelperMessages(next, [{ message_id: index, swipe_id: desired.swipe_id, message: desired.mes }])
+      next.messages[index].swipes = structuredClone(desired.swipes)
+      next.messages[index].swipes[desired.swipe_id] = desired.mes
     }
     const count=Math.max(before.variables.length,now.variables.length,1)
     if (desired.variables.length > Math.max(count,before.swipes.length)) conflict('模板变量指向不存在的 swipe')
@@ -81,6 +87,7 @@ export function applyFullPromptTemplateState(current, baseline, request) {
       const b=before.variables[swipe] || {}, d=desired.variables[swipe] || {}, n=now.variables[swipe] || {}
       if (!isDeepStrictEqual(b,d)) variables[swipe]=merge(b,n,d,'消息变量')
     }
+    if (desired.swipes.length < before.swipes.length) variables.length = desired.variables.length
     if (!isDeepStrictEqual(variables,now.variables)) next.messages[index].variables=variables
     const fields = row=>Object.fromEntries(templateFields.filter(key=>own(row,key)).map(key=>[key,row[key]]))
     const merged=merge(fields(before),fields(now),fields(desired),'模板消息标记')
@@ -96,5 +103,17 @@ export function applyFullPromptTemplateState(current, baseline, request) {
   metadata.variables=merge(base.chat_metadata.variables,latest.chat_metadata.variables,request.chat_metadata.variables,'聊天变量')
   next.variables=metadata.variables; delete metadata.variables
   next.tavernPluginMetadata=metadata
+  if (next.promptTemplateInput?.message) next.promptTemplateInput.message = next.messages.pop()
   return next
+}
+
+
+export function expandFullPromptTemplatePatch(baseline, request) {
+  if (!Array.isArray(request?.changes) || Object.keys(request).some(key=>!['chatId','sessionId','stateRevision','lifecycleRevision','changes'].includes(key))) throw new Error('模板增量存档字段无效')
+  assertPluginJson(request,'模板增量存档')
+  if (request.changes.some(change=>!Array.isArray(change.path) || !['chat','chat_metadata'].includes(change.path[0]))) throw new Error('模板增量不能修改读取版本或聊天身份')
+  const {changes,...header}=request
+  const expanded={...applyTemplateStateChanges(projectFullPromptTemplateState(baseline),changes),...header}
+  validateFullPromptTemplateSave(expanded)
+  return expanded
 }

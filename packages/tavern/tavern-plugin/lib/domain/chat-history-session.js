@@ -1,4 +1,4 @@
-import { sessionEvents } from './session-events.js'
+import { ensureSessionSystemHead, sessionEvents, appendSessionEvent, sessionEventData } from './session-events.js'
 import { createForegroundFrameBuilder } from './agent-input-frame.js'
 import { createForegroundFrameSessionAdapter } from './foreground-frame-session-adapter.js'
 import { foregroundFrameInputs } from './turn-orchestration.js'
@@ -61,7 +61,7 @@ export async function buildImportedConversation(chat, parsed, { operationId, fil
           inputs: foregroundFrameInputs(plan, userText, userText, chat.runtimePresetSnapshot, chat),
           source: { importSource: message.importSource } })
         const adapted = createForegroundFrameSessionAdapter({ id: () => `tavern-import-frame:${operationId}:${turn}` })
-          .append({ messages: [], frame, step: 1 })
+          .append({ messages: [], frame, step: 1, historyMessages: events.filter(event => event.type === 'user/message').map(event => event.data) })
         events.push({ type: 'turn/start', data: { turn } }, { type: 'step/start', data: { turn, step: 1 } })
         for (const context of adapted.messages) events.push({ type: 'user/message', data: context, intent: { surfaceOp: 'append' } })
         chat.timeline.checkpoints.push({ id: `import-checkpoint:${operationId}:${turn}`, turn, userText: pendingUsers.join('\n\n'),
@@ -86,6 +86,7 @@ export async function buildImportedConversation(chat, parsed, { operationId, fil
 
 /** Resume only our exact contiguous event prefix; never rewrite append-only history. */
 export async function appendImportedEvents(session, plan, flush) {
+  ensureSessionSystemHead(session)
   const events = sessionEvents(session).filter(event => event.type !== 'session/end-seed')
   let start = events.findIndex(event => event.type === 'turn/start' || event.type === 'assistant/message' ||
     (event.type === 'user/message' && event.data?.id !== 'tavern-session-prefix:' + session.id))
@@ -94,8 +95,8 @@ export async function appendImportedEvents(session, plan, flush) {
   for (let index = 0; index < plan.events.length; index++) {
     const expected = plan.events[index], existing = events[start + index]
     if (existing) {
-      if (existing.type !== expected.type || JSON.stringify(existing.data) !== JSON.stringify(expected.data)) throw new Error('导入事件与当前 Session 不一致，拒绝重复追加')
-    } else session.append(expected.type, expected.data, expected.intent)
+      if (existing.type !== expected.type || JSON.stringify(existing.data) !== JSON.stringify(sessionEventData(session, expected.type, expected.data))) throw new Error('导入事件与当前 Session 不一致，拒绝重复追加')
+    } else appendSessionEvent(session, expected.type, expected.data, expected.intent)
   }
   await flush(session)
 }

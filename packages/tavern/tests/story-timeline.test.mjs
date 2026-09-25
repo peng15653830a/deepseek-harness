@@ -508,3 +508,21 @@ test('台账随正文 checkpoint 回退，旧后台迟到不能恢复撤回的�
   const settled = timeline.complete({ chat: latest.chat, operationId: latest.value.operationId, basedOn: latest.value.basedOn, outcome: { status: 'success' }, apply(draft) { draft.ledger.items[0].qty = 1 } })
   assert.equal(settled.chat.ledger.items[0].qty, 1)
 })
+
+test('body edit invalidates stale posture and rewinds background before the edited round', () => {
+  const { timeline } = harness()
+  let chat = timeline.apply({ intent: { kind: 'ensure' }, chat: { id: 'edited', mode: 'story', messages: [
+    { role: 'user', text: '开门' }, { role: 'assistant', turn: 2, text: '陆伯拿蓝灯笼' }
+  ], posture: '陆伯拿蓝灯笼', variables: { hp: 9 }, scriptState: { cursor: 2 }, settleStatus: 'done', lastSettle: { ts: 1 } } }).chat
+  const background = { role: 'background', lifetime: 'chat', sessionId: 'bg', status: 'current', boundary: 40, branchId: chat.timeline.branchId }
+  chat.timeline.participants.background = background
+  chat.timeline.checkpoints = [{ turn: 2, participants: { background: { ...background, boundary: 19 } } }]
+  chat = timeline.apply({ chat, intent: { kind: 'body.edit', turn: 2, patch: { text: '沈青拿红纸伞' } } }).chat
+  assert.equal(chat.posture, '')
+  assert.equal(chat.lastSettle, null)
+  assert.deepEqual(chat.variables, { hp: 9 })
+  assert.deepEqual(chat.scriptState, { cursor: 2 })
+  const task = timeline.apply({ chat, intent: { kind: 'agent.begin', role: 'candidate' } })
+  assert.equal(task.value.participant.sessionId, 'bg')
+  assert.equal(task.value.participant.rewindTo, 19)
+})

@@ -21,7 +21,7 @@ function textOf(node) {
 
 const change = path => ({ operation: 'set', path, before: '旧值', after: '新值' })
 test('中断结算明确展示重试入口而不是仍在结算', () => {
-  const text = textOf(sandbox.TavernMvuReceipt({ receipt: { status: 'interrupted' } }))
+  const text = textOf(sandbox.TavernMvuReceipt({ latest: true, receipt: { status: 'interrupted' } }))
   assert.match(text, /变量结算已中断/)
   assert.match(text, /重试变量结算/)
   assert.doesNotMatch(text, /变量结算中/)
@@ -62,6 +62,40 @@ test('只过滤顶层保留字段，不误删同名业务变量或失败详情',
   assert.match(text, /\/stat_data\/display_data/)
   assert.match(text, /\/display_data_extra/)
   assert.match(text, /结构校验失败/)
-  const errorText = textOf(sandbox.TavernMvuReceipt({ receipt: { ...receipt, status: 'error' } }))
+  const errorText = textOf(sandbox.TavernMvuReceipt({ latest: true, receipt: { ...receipt, status: 'error' } }))
   assert.match(errorText, /重试变量结算/)
+})
+
+
+test('只有最新正文提供重算入口，忙碌时禁用，指导意见随请求提交', async () => {
+  const receipt = { status: 'updated', changes: [] }
+  const historical = sandbox.TavernMvuReceipt({ receipt, latest: false })
+  assert.doesNotMatch(textOf(historical), /重新结算变量/)
+  const findButton = node => {
+    if (!node || typeof node !== 'object') return null
+    if (node.type === 'button') return node
+    for (const child of (Array.isArray(node) ? node : node.children || [])) {
+      const found = findButton(child)
+      if (found) return found
+    }
+    return null
+  }
+  const current = sandbox.TavernMvuReceipt({ receipt, latest: true, sessionId: 's', turn: 2 })
+  assert.equal(current.type, 'details')
+  assert.match(textOf(current), /重新结算变量/)
+  const busy = sandbox.TavernMvuReceipt({ receipt, latest: true, busy: true })
+  assert.equal(findButton(busy).props.disabled, true)
+  let request
+  sandbox.askTavernText = async options => {
+    assert.equal(options.allowEmpty, true)
+    await options.onSubmit('不要扣库存')
+  }
+  sandbox.rpc = async (...args) => { request = args }
+  sandbox.liveTavernView = { invalidate() {} }
+  sandbox.tavernErrorHub = { report(_label, error) { throw error } }
+  await findButton(current).props.onClick()
+  assert.equal(request[0], 'retrySettlement')
+  assert.equal(request[1].turn, 2)
+  assert.equal(request[1].guidance, '不要扣库存')
+  assert.equal(request[2], 's')
 })

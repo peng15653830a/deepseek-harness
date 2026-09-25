@@ -1,3 +1,4 @@
+import {buildMvuArtifacts} from '../tavern-plugin/lib/domain/mvu-conversion-artifacts.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readdir, readFile } from 'node:fs/promises'
@@ -12,17 +13,17 @@ import { projectReplyLayers } from '../tavern-plugin/lib/domain/reply-presentati
 import { projectPersistentStatusView } from '../tavern-plugin/lib/domain/persistent-status-view.js'
 
 const root = new URL('../presets/tavern/skills/', import.meta.url)
+const skillRoot = new URL('card-to-mvu/', root)
 const backgroundRoot = new URL('../presets/tavern-background/skills/', import.meta.url)
-const skillRoot = new URL('tavern-card-to-mvu/', root)
-const recipe = await readFile(new URL('references/mvu-recipe.md', skillRoot), 'utf8')
-const statusHtml = await readFile(new URL('assets/status.html', skillRoot), 'utf8')
+const definition = { initialState: {场景:{地点:'入口'},玩家:{位置:'门口'},人物:{$meta:{extensible:true,template:{姓名:'',位置:'未明确',在场:true}}}}, updateRules: '按正文事实更新玩家位置与人物档案' }
+const {entries: recipeEntries, regexScripts: recipeRegex, statusHtml} = buildMvuArtifacts(definition)
 
 test('转换 Skill 可由 Tavern 内置目录读取，引用资源齐全且默认可调用', async () => {
   const skills = createTavernSkillModule({ directory: new URL('../data/skills/', import.meta.url).pathname, builtInDirectory: root.pathname })
-  const skill = await skills.read('tavern-card-to-mvu')
+  const skill = await skills.read('card-to-mvu')
   assert.equal(skill.source, 'builtin')
   const metadata = parse(skill.content.match(/^---\n([\s\S]*?)\n---/)[1])
-  assert.equal(metadata.name, 'tavern-card-to-mvu')
+  assert.equal(metadata.name, 'card-to-mvu')
   assert.ok(metadata.description.length > 0 && metadata.description.length <= 500)
   assert.notEqual(metadata['disable-model-invocation'], true)
   assert.notEqual(metadata['user-invocable'], false)
@@ -31,46 +32,29 @@ test('转换 Skill 可由 Tavern 内置目录读取，引用资源齐全且默�
   }
 })
 
-test('转换 Skill 清理副本内重复的候选项生成机制并保留无关内容', async () => {
+test('转换 Skill 保留候选项清理和迁移后直接删除要求', async () => {
   const skills = createTavernSkillModule({ directory: new URL('../data/skills/', import.meta.url).pathname, builtInDirectory: root.pathname })
-  const skill = await skills.read('tavern-card-to-mvu')
-  assert.match(skill.content, /候选项生成提示、按钮、正则、HTML 与 Helper 脚本/)
-  assert.match(skill.content, /只清理[^\n]*候选项生成[^\n]*保留[^\n]*无关/)
-  assert.match(skill.content, /DSH Tavern 内置候选项/)
-  assert.match(skill.content, /不存在第二套候选项生成机制/)
-})
-
-test('转换 Skill 直接移除旧协议，不向前台追加迁移说明或新行文规则', async () => {
-  const skills = createTavernSkillModule({ directory: new URL('../data/skills/', import.meta.url).pathname, builtInDirectory: root.pathname })
-  const skill = await skills.read('tavern-card-to-mvu')
-  assert.match(skill.content, /直接删除旧状态与候选项协议/)
-  assert.match(skill.content, /不写一段“只写剧情正文”或“不再输出[^”]+”作为替代说明/)
-  assert.match(skill.content, /新人物登场[^\n]*原卡已有[^\n]*原样保留[^\n]*转换过程不新增/)
-})
-
-test('转换 Skill 将随机人物迁移为当前对话专属人物库', async () => {
-  const skills = createTavernSkillModule({ directory: new URL('../data/skills/', import.meta.url).pathname, builtInDirectory: root.pathname })
-  const skill = await skills.read('tavern-card-to-mvu')
-  assert.match(skill.content, /当前对话[^\n]*人物库/)
-  assert.match(skill.content, /同一张卡[^\n]*新对话/)
-  assert.match(skill.content, /tavern-character-design/)
-  assert.match(skill.content, /在场[^\n]*false[^\n]*不展示/)
+  const skill = await skills.read('card-to-mvu')
+  assert.match(skill.content, /删除副本中重复的生成要求/)
+  assert.match(skill.content, /保留剧情中的选择、分支条件与实际游戏交互/)
+  assert.match(skill.content, /从原位置直接删除已迁移内容及其空标题、空容器/)
+  assert.match(skill.content, /不留下.*替代说明、注释或占位文字/)
 })
 
 test('人物设计是现有后台 Agent 按需加载的内置 Skill', async () => {
   const cardSkillNames = (await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort()
   const backgroundSkillNames = (await readdir(backgroundRoot, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort()
-  assert.equal(cardSkillNames.includes('tavern-character-design'), false)
-  assert.deepEqual(backgroundSkillNames, ['tavern-character-design'])
+  assert.equal(cardSkillNames.includes('character-design'), false)
+  assert.deepEqual(backgroundSkillNames, ['character-design'])
   const skills = createTavernSkillModule({ directory: new URL('../data/skills/', import.meta.url).pathname, builtInDirectory: backgroundRoot.pathname })
-  const skill = await skills.read('tavern-character-design')
+  const skill = await skills.read('character-design')
   assert.equal(skill.source, 'builtin')
   const metadata = parse(skill.content.match(/^---\n([\s\S]*?)\n---/)[1])
-  assert.equal(metadata.name, 'tavern-character-design')
+  assert.equal(metadata.name, 'character-design')
   assert.equal(metadata['user-invocable'], false)
   assert.match(skill.content, /提前储备/)
   assert.match(skill.content, /同一个 Agent 会话/)
-  assert.match(skill.content, /不要创建或请求另一个人物设计 Agent/)
+  assert.match(skill.content, /不创建另一个 Agent/)
   assert.match(skill.content, /普通卡与 MVU 卡/)
   assert.match(skill.content, /不接收变量路径或变量对象/)
   assert.match(skill.content, /character_design_read/)
@@ -80,14 +64,13 @@ test('人物设计是现有后台 Agent 按需加载的内置 Skill', async () =
   assert.match(skill.content, /不使用“未明确”“未知”“待定”/)
   assert.match(skill.content, /不设固定数量上限/)
   assert.doesNotMatch(skill.content, /仅在卡片已有人物库/)
-  assert.match(skill.content, /`posture_submit` 或 `mvu_submit_update`，仍须照常调用/)
+  assert.match(skill.content, /本次任务不提交姿势、变量或候选项/)
   assert.match(skill.content, /不[^\n]*前台正文 Agent/)
 })
 
 test('Skill 配方可构造可导入卡，规则分流、状态显示及模型历史隔离均有效', () => {
-  const entries = JSON.parse(recipe.match(/```json\n([\s\S]*?)\n```/)[1])
-  const regexCode = recipe.match(/```js\n([\s\S]*?)\n```/)[1]
-  const regex = vm.runInNewContext(regexCode + '\nJSON.stringify(statusRegex)', { statusHtml })
+  const entries = recipeEntries
+  const regex = JSON.stringify(recipeRegex)
   const card = { spec: 'chara_card_v3', spec_version: '3.0', data: {
     name: '转换配方测试', description: '{{char}} 与 {{user}} 的旅途。',
     first_mes: '你站在门口。\n\n<mvu-status/>',
@@ -104,9 +87,9 @@ test('Skill 配方可构造可导入卡，规则分流、状态显示及模型�
   assert.equal(constantWorldBookContext({ worldBook }).context, '')
   assert.deepEqual(mvuUpdateRulesFromWorldBook(worldBook), [entries[1].content])
   const initial = JSON.parse(entries[0].content)
-  assert.equal(initial.人物库.$meta.extensible, true)
-  assert.equal(initial.人物库.$meta.template.状态.在场, false)
-  assert.equal(initial.人物库.$meta.template.设计.性格, '')
+  assert.equal(initial.人物.$meta.extensible, true)
+  assert.equal(initial.人物.$meta.template.在场, true)
+  assert.equal(initial.人物.$meta.template.位置, '未明确')
   assert.equal(initial.玩家.位置, '门口')
   const layers = projectReplyLayers(card.data.first_mes, { regexScripts: extensions.regexScripts, placement: 2, depth: 0 })
   assert.equal(layers.sessionText.trim(), '你站在门口。')
@@ -116,6 +99,8 @@ test('Skill 配方可构造可导入卡，规则分流、状态显示及模型�
     { role: 'assistant', turn: 1, displayRuntime: { frames: [{ partIndex: index, mvuViewUsed: true }] } }
   ], [{ turn: 1, parts: layers.displayParts }], { regexScripts: extensions.regexScripts })
   assert.ok(result.statusView?.content.includes('Mvu.getMvuData'))
+  assert.equal(result.statusViews.length, 1)
+  assert.ok(result.projections[0].parts.every(part => part.kind !== 'html'))
 })
 
 test('通用状态模板重新读取变量并刷新 DOM，支持新增与恢复且跳过内部字段', async () => {
@@ -145,6 +130,7 @@ test('通用状态模板重新读取变量并刷新 DOM，支持新增与恢复�
   handlers.get('update')()
   assert.deepEqual(nodes.values.children.map(item => item.textContent), [
     '玩家 · 位置', '大厅', '人物 · 新人物 · 姓名', '<img src=x onerror=alert(1)>',
+    '人物库 · 预备人物 · 姓名', '暂不展示', '人物库 · 预备人物 · 状态 · 在场', 'false',
     '人物库 · 登场人物 · 姓名', '林晴', '人物库 · 登场人物 · 状态 · 在场', 'true'
   ])
   data = { 玩家: { 位置: '门口' } }

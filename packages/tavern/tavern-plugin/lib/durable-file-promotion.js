@@ -204,6 +204,40 @@ export function createDurableFilePromotion(options = {}) {
       } catch (error) { if (error?.code === 'ENOENT') return ''; throw error }
     },
     async read(target) { return readTarget(path.resolve(target)) },
+    // Newline-framed diagnostic logs: ordinary commits append and fsync only
+    // the new frame. Creation, rotation and torn-tail recovery use the same
+    // durable promotion protocol as snapshots, under the same writer lock.
+    async append(target, value, { maxBytes, compact } = {}) {
+      const frame = bytes(value)
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < frame.length || typeof compact !== 'function'
+        || frame.length === 0 || frame.at(-1) !== 10) throw new Error('追加日志参数无效')
+      const absolute = path.resolve(target)
+      return enqueue(absolute, () => withWriteLock(absolute, async function () {
+        const pending = await pendingSnapshots(absolute)
+        let info
+        try { info = await stat(absolute) } catch (error) { if (error?.code !== 'ENOENT') throw error }
+        async function rewrite(current) {
+          const snapshot = bytes(await compact(current, frame))
+          if (snapshot.length > maxBytes || snapshot.at(-1) !== 10) throw new Error('日志压缩结果超出限制或缺少行边界')
+          return writeTarget(absolute, snapshot)
+        }
+        if (pending.length) return rewrite(pending.at(-1).value)
+        if (!info || info.size === 0 || info.size + frame.length > maxBytes) return rewrite(await readTarget(absolute))
+        const handle = await open(absolute, 'a+')
+        let incomplete = false
+        try {
+          const tail = Buffer.alloc(1)
+          const { bytesRead } = await handle.read(tail, 0, 1, info.size - 1)
+          incomplete = bytesRead !== 1 || tail[0] !== 10
+          if (!incomplete) {
+            await handle.writeFile(frame)
+            await handle.sync()
+          }
+        } finally { await handle.close() }
+        if (incomplete) return rewrite(await readTarget(absolute))
+        return { status: 'appended', bytes: frame.length }
+      }))
+    },
     async write(target, value) {
       const absolute = path.resolve(target)
       return enqueue(absolute, () => withWriteLock(absolute, () => writeTarget(absolute, value)))

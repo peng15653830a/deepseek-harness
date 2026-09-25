@@ -23,3 +23,9 @@ export function createFullPromptTemplateAssetReader({ directory = root, read = r
   }
 }
 export const readFullPromptTemplateAsset = createFullPromptTemplateAssetReader()
+
+export async function fullPromptTemplateRuntimeInfo() {
+  const manifest = JSON.parse(await readFile(new URL('manifest.json', root), 'utf8'))
+  if (manifest.upstreamCommit !== commit || !manifest.files?.['index.js']?.sha256) throw new Error('模板运行时版本与宿主不一致')
+  return { entryUrl: FULL_PROMPT_TEMPLATE_ASSET_PREFIX + 'index.js?v=' + manifest.files['index.js'].sha256 }
+}

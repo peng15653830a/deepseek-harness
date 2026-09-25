@@ -103,3 +103,20 @@ test('helper RPC recovers response delivery after document.open removes listener
   assert.deepEqual(await transport.request('getTavernHelperWorldbook', {}), { ready: true })
   assert.equal(listeners.size, 1)
 })
+
+test('脚本拒绝保留宿主错误码和事件归属，失败不会阻塞下一次 RPC', async () => {
+  let receive
+  const sent = []
+  const parent = { postMessage: message => sent.push(message) }
+  const transport = helperClient.createTavernHelperTransport({ parent, token: 'error-code', copy: structuredClone,
+    identity: () => ({ eventId: 'mvu-work:one', scriptId: 'helper' }), listen: fn => { receive = fn }, onContext() {}, onEvent() {} })
+  const failed = transport.request('updateTavernHelperVariables', {})
+  const rejection = assert.rejects(failed, error => error.code === 'MVU_SETTLEMENT_EVENT_MISMATCH'
+    && error.dshTavernEventId === 'mvu-work:one' && error.dshTavernScriptId === 'helper')
+  receive({ source: parent, data: { token: 'error-code', type: 'dsh-tavern-helper-response', requestId: sent[0].requestId,
+    ok: false, error: '脚本写入不属于当前 MVU 结算事件', errorCode: 'MVU_SETTLEMENT_EVENT_MISMATCH' } })
+  await rejection
+  const next = transport.request('getTavernHelperContext', {})
+  receive({ source: parent, data: { token: 'error-code', type: 'dsh-tavern-helper-response', requestId: sent[1].requestId, ok: true, result: { fresh: true } } })
+  assert.equal((await next).fresh, true)
+})

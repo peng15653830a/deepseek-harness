@@ -23,7 +23,11 @@ test('脚本扫描触发原生世界书，正文进入实际 Frame，不修改�
   const prior = [{ id: 'old', role: 'assistant', content: [{ type: 'text', text: '旧剧情' }] }]
   const output = createForegroundFrameSessionAdapter({ id: () => 'new' }).append({ messages: prior, frame, step: 1 })
   assert.match(output.messages.at(-1).content[0].text, /请继续当前事件/)
-  assert.match(output.messages.at(-1).content[0].text, /王都有三座城门/)
+  const snapshot = output.messages.find(message => message.source?.worldbookSnapshot)
+  assert.equal(snapshot.source.worldbookSnapshot.text, '王都有三座城门')
+  assert.match(snapshot.content[0].text, /王都有三座城门/)
+  assert.doesNotMatch(output.messages.at(-1).content[0].text, /王都有三座城门/)
+  assert.deepEqual(output.messages[0], prior[0])
   assert.equal(frame.contributions.filter(x => x.source.stage === 'tavern-script-prompt').length, 1)
   assert.deepEqual(worldBook, original)
   assert.equal(prior.length, 1)

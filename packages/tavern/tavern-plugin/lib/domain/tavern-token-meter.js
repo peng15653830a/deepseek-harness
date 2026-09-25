@@ -1,21 +1,6 @@
+import { isTavernSurfaceEdit } from './session-surface-mutations.js'
 const installations = new WeakMap()
 
-function isTavernSurfaceEdit(session, event) {
-  if (event?.type !== 'assistant/message' || event.data?.usage !== undefined) return false
-  const message = event.data?.message
-  const source = message?.source
-  if (source?.kind !== 'model') return false
-  if (source.provider === 'dsh-tavern' && source.model === 'synthetic-trajectory' &&
-      message.id?.startsWith('tavern-seed-trajectory:')) return true
-  if (!['tavern', 'tavern-background'].includes(session.header?.agentPreset)) return false
-  const replacement = event.surfaceOp
-  const refs = event.sourceEventSeqs
-  if (replacement?.op !== 'replace' || !Array.isArray(refs) || refs.length === 0) return false
-  // Tavern cites replaced surface messages, not provider streaming chunks.
-  // Keep genuine malformed provider replies subject to the native validation.
-  return refs.every(seq => Number.isSafeInteger(seq) && seq >= replacement.start && seq <= replacement.end && seq < event.seq &&
-    ['user/message', 'assistant/message', 'tool/result'].includes(session.eventAt(seq).type))
-}
 
 /**
  * rc.1's meter assumes every assistant/message belongs to an active model step.
@@ -31,14 +16,43 @@ export function installTavernTokenMeter(meter) {
   if (!entry) {
     const original = meter._foldEvent
     const hadOwn = Object.hasOwn(meter, '_foldEvent')
-    function fold(session, state, event) {
-      const accountingEvent = isTavernSurfaceEdit(session, event)
+    const compactSignature = original.length === 2
+    const originalSync = meter._sync
+    const hadOwnSync = Object.hasOwn(meter, '_sync')
+    if (compactSignature && typeof originalSync !== 'function') throw new Error('当前 DSH Token Meter 缺少同步入口')
+    const presetCursors = new WeakMap()
+    function presetBefore(session, state, seq) {
+      let cursor = presetCursors.get(state)
+      if (!cursor || cursor.session !== session || seq < cursor.nextSeq) {
+        cursor = { session, nextSeq: 0, selected: undefined }
+        presetCursors.set(state, cursor)
+      }
+      // Read only the unseen prefix, excluding the event being classified.
+      // Reset with the host fold state, or when a replay moves backwards.
+      while (cursor.nextSeq < seq) {
+        const previous = session.eventAt(cursor.nextSeq)
+        if (previous?.type === 'agent-preset/selected') cursor.selected = previous.data?.agentPreset
+        cursor.nextSeq++
+      }
+      return cursor.selected ?? session.header?.agentPreset
+    }
+    let activeSession
+    function sync(session, ...args) {
+      const previous = activeSession
+      activeSession = session
+      try { return originalSync.call(this, session, ...args) }
+      finally { activeSession = previous }
+    }
+    function fold(...args) {
+      const [session, state, event] = compactSignature ? [activeSession, ...args] : args
+      const accountingEvent = session && isTavernSurfaceEdit(session, event, state.surface, () => presetBefore(session, state, event.seq))
         ? { ...event, type: 'user/message', data: event.data.message }
         : event
-      return original.call(this, session, state, accountingEvent)
+      return compactSignature ? original.call(this, state, accountingEvent) : original.call(this, session, state, accountingEvent)
     }
     meter._foldEvent = fold
-    entry = { original, fold, hadOwn, users: 0 }
+    if (compactSignature) meter._sync = sync
+    entry = { original, fold, hadOwn, originalSync, hadOwnSync, compactSignature, users: 0 }
     installations.set(meter, entry)
   }
   entry.users++
@@ -49,6 +63,10 @@ export function installTavernTokenMeter(meter) {
     if (--entry.users !== 0) return
     if (entry.hadOwn) meter._foldEvent = entry.original
     else delete meter._foldEvent
+    if (entry.compactSignature) {
+      if (entry.hadOwnSync) meter._sync = entry.originalSync
+      else delete meter._sync
+    }
     installations.delete(meter)
   }
 }

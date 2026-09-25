@@ -75,7 +75,7 @@ export function createCandidateTasks({ chats, generator, backgroundTasks, sessio
     if (chat === undefined) {
       return { runtimeGeneration, liveSession, projectionRevision: 0, activity: null, mailboxVersion: 0, task: null, tasks: { candidate: null, background: null } }
     }
-    const synced = await taskMailbox.sync(chat.id, selector)
+    const synced = await taskMailbox.sync(chat.id, selector, current => backgroundTasks.activity(current))
     let task = synced.task
     if (task === null && str(selector.kind) === 'candidate' && chat.candidates && typeof chat.candidates === 'object') {
       task = {
@@ -86,7 +86,7 @@ export function createCandidateTasks({ chats, generator, backgroundTasks, sessio
         createdAt: Number(chat.candidates.generatedAt) || 0, updatedAt: Number(chat.candidates.generatedAt) || 0
       }
     }
-    const activity = backgroundTasks.activity(await readChat(chat.id))
+    const activity = synced.projection
     const backgroundTask = activity.operationId === '' ? null : {
       taskId: activity.operationId,
       requestId: '',

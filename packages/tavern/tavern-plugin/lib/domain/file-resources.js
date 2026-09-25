@@ -1,5 +1,6 @@
 import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { createDurableFilePromotion } from '../durable-file-promotion.js'
 import { createResourceMutationJournal } from './resource-mutation-journal.js'
 import { inspectPreset } from './preset-reading.js'
@@ -237,6 +238,24 @@ export function createFileResourceStore(options = {}) {
     return value === undefined ? undefined : value.toString('utf8')
   }
 
+  async function metadata(relative) {
+    const normalized = normalizeResourcePath(relative)
+    const workingPath = absolute(normalized)
+    let originalPath = absolute(normalized, true)
+    if (resourceKind(normalized) === 'card') {
+      const originalName = await originalCardName(normalized)
+      if (originalName !== null) originalPath = path.join(path.dirname(originalPath), originalName)
+    }
+    const readStat = async function (target) {
+      try { return await stat(target) } catch (error) { if (error && error.code === 'ENOENT') return null; throw error }
+    }
+    const [working, original] = await Promise.all([readStat(workingPath), readStat(originalPath)])
+    return {
+      importedAt: Number(original && original.mtimeMs) || Number(working && working.mtimeMs) || 0,
+      updatedAt: Number(working && working.mtimeMs) || 0
+    }
+  }
+
   async function readCard(relative) {
     const normalized = normalizeResourcePath(relative, 'card')
     const text = await readText(normalized)
@@ -438,6 +457,76 @@ export function createFileResourceStore(options = {}) {
     const material = normalizeResourcePath(materialPath, 'source')
     const bindings = await readBindings()
     return Object.keys(bindings).filter(function (cardPath) { return bindings[cardPath] === material })
+  }
+
+  let copyTail = Promise.resolve()
+  function copyCard(sourcePath, name) {
+    const operation = copyTail.then(async () => {
+      await ensure()
+      const source = normalizeResourcePath(sourcePath, 'card')
+      const stem = safeResourceName(name).replace(/\.json$/i, '')
+      const target = normalizeResourcePath('cards/' + stem + '.json', 'card')
+      if (source === target || await exists(absolute(target)) || await originalCardName(target) !== null) throw new Error('副本名称已存在，请使用新名称: ' + stem)
+      const card = await readCard(source)
+      if (!card) throw new Error('人物卡不存在: ' + source)
+      const image = await readCardImage(source)
+      const saved = clone(card)
+      delete saved.id
+      delete saved.path
+      if (saved.raw && saved.meta) {
+        saved.meta.id = randomUUID()
+        if (saved.raw.data && typeof saved.raw.data === 'object') saved.raw.data.name = stem
+        if (Object.hasOwn(saved.raw, 'name') || !saved.raw.data) saved.raw.name = stem
+      } else {
+        if (saved.data && typeof saved.data === 'object') saved.data.name = stem
+        if (Object.hasOwn(saved, 'name') || !saved.data) saved.name = stem
+        if (saved.meta && typeof saved.meta === 'object') saved.meta.id = randomUUID()
+      }
+      const text = JSON.stringify(saved, null, 2)
+      const original = absolute('cards/' + stem + (image ? '.png' : '.json'), true)
+      await writeFile(original, image || text, { flag: 'wx' })
+      try { await writeFile(absolute(target), text, { flag: 'wx' }) }
+      catch (error) { await rm(original, { force: true }); throw error }
+      return { path: target, sourcePath: source, imageCopied: !!image }
+    })
+    copyTail = operation.catch(() => {})
+    return operation
+  }
+
+  // A conversion owns its copy, image and binding as one recoverable mutation.
+  // Compare disk snapshots again at publication, never overwrite a same-name card.
+  async function inspectMvuDestination(targetPath) {
+    const target = normalizeResourcePath(targetPath, 'card')
+    const working = await readText(target)
+    const original = await originalCardName(target)
+    return { available: working !== undefined || original === null, workingExists:working !== undefined,
+      originalExists:original !== null, reason:working === undefined && original !== null ? '副本原版资源已存在，请换名' : null }
+  }
+  function saveMvuCard({ sourcePath, targetPath, document, expectedSourceText, expectedTargetText, finalize }) {
+    const operation = copyTail.then(async () => {
+      await ensure()
+      const source = normalizeResourcePath(sourcePath, 'card'), target = normalizeResourcePath(targetPath, 'card')
+      if (source === target) throw new Error('MVU 转换不能覆盖原卡')
+      if (await readText(source) !== expectedSourceText || await readText(target) !== expectedTargetText) throw new Error('人物卡已变化，请重新读取后转换')
+      if (expectedTargetText === undefined && await originalCardName(target) !== null) throw new Error('副本原版资源已存在，请换名')
+      const saved = clone(document), image = await readCardImage(source)
+      if (saved.kind === 'dsh-tavern-character-workspace' && !saved.meta?.id) saved.meta = { ...saved.meta, id: randomUUID() }
+      if (finalize) finalize(saved)
+      const text = JSON.stringify(saved, null, 2)
+      const bindings = await readWorldBookBindings()
+      bindings[target] = { kind: 'embedded', cardPath: target }
+      const result = await mutations.run('convert-mvu:' + target, async plan => {
+        await plan.write(absolute(target), text)
+        if (expectedTargetText === undefined) {
+          const original = target.replace(/\.json$/i, image ? '.png' : '.json')
+          await plan.write(absolute(original, true), image || text)
+        }
+        await plan.write(worldBookBindingsPath, JSON.stringify(bindings, null, 2))
+      })
+      return { path: target, changed: result.changed, imageCopied: !!image }
+    })
+    copyTail = operation.catch(() => {})
+    return operation
   }
 
   async function importCard(payload, card) {
@@ -884,5 +973,5 @@ export function createFileResourceStore(options = {}) {
     return result
   }
 
-  return Object.freeze({ absolute, bindMaterial, bindWorldBook, bindWorldBooks, cardsForMaterial, ensure, ensureCardWorkspace, hasCardImage, importCard, importText, importWorldBook, list, migrateLegacy, readCard, readCardImage, readText, remove, rename: renameResource, replaceScript, restoreCard, scriptBindingsForCards, scriptForCard, unbindMaterial, unbindWorldBook, worldBookBindingForCard, writeWorking })
+  return Object.freeze({ absolute, copyCard, saveMvuCard, inspectMvuDestination, bindMaterial, bindWorldBook, bindWorldBooks, cardsForMaterial, ensure, ensureCardWorkspace, hasCardImage, importCard, importText, importWorldBook, list, metadata, migrateLegacy, readCard, readCardImage, readText, remove, rename: renameResource, replaceScript, restoreCard, scriptBindingsForCards, scriptForCard, unbindMaterial, unbindWorldBook, worldBookBindingForCard, writeWorking })
 }

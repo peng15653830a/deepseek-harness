@@ -131,7 +131,7 @@ export function readPlayChatDebugTurn(editorChat, sourceChat, reference, request
   const found = messageForTurn(sourceChat, turn)
   if (found === null) throw new Error('游玩记录中不存在第 ' + turn + ' 轮回复')
   const message = found.message
-  const layers = ['overview', 'turns', 'conversation', 'input', 'source', 'session', 'display', 'saved-display', 'diagnostics', 'tavern', 'foreground', 'background', 'request', 'iframe']
+  const layers = ['overview', 'turns', 'conversation', 'input', 'source', 'session', 'display', 'saved-display', 'diagnostics', 'tavern', 'foreground', 'background', 'request', 'worldbook', 'iframe']
   const layer = layers.includes(request.layer) ? request.layer : 'overview'
   const projected = typeof currentProjection === 'function' ? currentProjection(message) : currentProjection
   let text = ''
@@ -146,6 +146,7 @@ export function readPlayChatDebugTurn(editorChat, sourceChat, reference, request
   else if (layer === 'foreground') text = agentEvidence(evidence.foreground, '前台')
   else if (layer === 'background') text = agentEvidence(evidence.background, '后台')
   else if (layer === 'request') text = '【真实模型请求 · 第 ' + turn + ' 轮】\n' + JSON.stringify(evidence.requests && Array.isArray(evidence.requests.requests) ? evidence.requests.requests : [], null, 2)
+  else if (layer === 'worldbook') text = '【世界书召回日志 · 第 ' + turn + ' 轮】\n' + (evidence.worldbook?.log ? JSON.stringify(evidence.worldbook.log, null, 2) : '这一轮没有详细召回日志，不能从当前世界书反推。')
   else if (layer === 'tavern') {
     text = '【Tavern 持久运行状态】\n' + json({
       chatId: sourceChat.id, mode: sourceChat.mode, sessionId: sourceChat.sessionId,

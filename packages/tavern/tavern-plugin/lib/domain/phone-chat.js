@@ -1,3 +1,4 @@
+import { postureForContext } from './posture-context.js'
 import { randomUUID } from 'node:crypto'
 
 function str(value) {
@@ -209,10 +210,11 @@ export function createPhoneChat(options) {
       await fail(chat.id, contact.id, requestId, error)
       throw error
     }
+    const posture = postureForContext(chat)
     const context = [
       '联系人：' + contact.name,
       contact.profile ? '人物设定：\n' + contact.profile : '',
-      chat.posture ? '当前场景状态：\n' + compact(chat.posture, 1200) : '',
+      posture ? '当前场景状态：\n' + compact(posture, 1200) : '',
       recentStory(chat) ? '最近剧情：\n' + recentStory(chat) : ''
     ].filter(Boolean).join('\n\n')
     const activeKey = requestKey(chat.id, contact.id, requestId)

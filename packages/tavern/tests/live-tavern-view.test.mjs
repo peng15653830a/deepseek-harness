@@ -380,3 +380,96 @@ test('协调快照首次请求永久挂起时会超时并继续下一次权威�
   assert.deepEqual(timers.activeDelays(), [2000])
   stop()
 })
+
+test('逐层挂载历史消息共享已有视图，不为每层重新请求', async () => {
+  const create = await loadFactory()
+  const timers = fakeTimers()
+  let loads = 0
+  const view = create({ load: async () => { loads++; return { view: { settleStatus: 'idle' } } },
+    schedule: timers.schedule, cancel: timers.cancel, startWatchdog: () => null, stopWatchdog() {} })
+  const disposers = [view.subscribe('history', () => {})]
+  await timers.runNext()
+  for (let i = 0; i < 40; i++) {
+    disposers.push(view.subscribe('history', () => {}))
+    if (timers.activeDelays().length) await timers.runNext()
+  }
+  disposers.forEach(dispose => dispose())
+  assert.equal(loads, 1)
+})
+
+test('历史消息 hook 首次挂载不强制刷新，后续修订仍刷新', async () => {
+  const source = await readFile(new URL('../tavern-plugin/src/client/main.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function useLiveTavernView(')
+  const end = source.indexOf('function useTavernCoordination(', start)
+  let previous
+  let effects = []
+  const invalidated = []
+  const context = { React: {
+    useState: init => [init(), () => {}],
+    useCallback: fn => fn, useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+    useRef: initial => (previous ||= { current: initial }),
+    useEffect: effect => effects.push(effect)
+  }, liveTavernView: { getSnapshot: () => ({}), subscribe: () => () => {}, invalidate: id => invalidated.push(id) } }
+  vm.runInNewContext(source.slice(start, end) + ';this.render=useLiveTavernView;', context)
+  function render(id, revision) { effects = []; context.render(id, revision); effects.forEach(effect => effect()) }
+  render('game', 'closed:1')
+  render('game', 'closed:1')
+  assert.deepEqual(invalidated, [])
+  render('game', 'closed:2')
+  assert.deepEqual(invalidated, ['game'])
+  render('other', 'closed:5')
+  assert.deepEqual(invalidated, ['game'])
+})
+
+test('切换会话的首次渲染不能返回旧会话快照', async () => {
+  const source = await readFile(new URL('../tavern-plugin/src/client/main.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function useLiveTavernView('), end = source.indexOf('function useTavernCoordination(', start)
+  let saved
+  const snapshots = { A: { view: { card: 'A' } }, B: { view: { card: 'B' } } }
+  const context = { React: {
+    useState(init) { saved ??= init(); return [saved, value => { saved = value }] },
+    useEffect() {}, useRef: value => ({ current: value }), useCallback: fn => fn,
+    useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot()
+  }, liveTavernView: { getSnapshot: id => snapshots[id] } }
+  vm.runInNewContext(source.slice(start, end) + ';this.render=useLiveTavernView;', context)
+  assert.equal(context.render('A', 0), snapshots.A)
+  assert.equal(context.render('B', 0), snapshots.B)
+})
+
+test('快照回收保护订阅者；过期请求不能复活旧快照；返回重新加载', async () => {
+  const timers = fakeTimers(); let resolve
+  const module = createLiveTavernViewModule({ load: () => new Promise(r => { resolve = r }),
+    schedule: timers.schedule, cancel: timers.cancel, pollWhileBusy: false })
+  const stop = module.subscribe('A', () => {})
+  await timers.runNext()
+  assert.equal(module.evict('A'), false)
+  stop()
+  assert.equal(module.evict('A'), true)
+  const fresh = module.getSnapshot('A')
+  resolve({ view: { old: true } }); await new Promise(r => setImmediate(r))
+  assert.equal(module.getSnapshot('A'), fresh)
+  assert.equal(fresh.view, null)
+  const stopAgain = module.subscribe('A', () => {})
+  await timers.runNext(); resolve({ view: { fresh: true } })
+  await new Promise(r => setImmediate(r))
+  assert.equal(module.getSnapshot('A').view.fresh, true)
+  stopAgain(); module.evict('A')
+})
+
+test('无订阅快照十分钟回收，返回取消回收；事件驱动视图不启动空转看门狗', async () => {
+  const timers = fakeTimers(); let watchdogs = 0
+  const module = createLiveTavernViewModule({ load: async () => ({ view: { value: 1 } }),
+    schedule: timers.schedule, cancel: timers.cancel, pollWhileBusy: false,
+    cacheRetentionMs: 600000, startWatchdog: () => { watchdogs++; return 1 } })
+  let stop = module.subscribe('A', () => {})
+  await timers.runNext()
+  const cached = module.getSnapshot('A')
+  stop(); assert.deepEqual(timers.activeDelays(), [600000])
+  stop = module.subscribe('A', () => {})
+  assert.equal(module.getSnapshot('A'), cached)
+  assert.deepEqual(timers.activeDelays(), [0])
+  await timers.runNext()
+  stop(); await timers.runNext()
+  assert.equal(module.getSnapshot('A').view, null)
+  assert.equal(watchdogs, 0)
+})

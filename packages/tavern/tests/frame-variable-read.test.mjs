@@ -22,7 +22,7 @@ function frame(observeMvuView = true) {
   context.window = context
   vm.createContext(context)
   for (const match of html.matchAll(/<script data-dsh-tavern-(?:helper|frame-variable-aliases|mvu-view-observer)>([\s\S]*?)<\/script>/g)) {
-    vm.runInContext(match[1].replace(/import\("[^"]+"\)/, 'Promise.resolve({})'), context)
+    vm.runInContext(match[1].replace('import(new URL("/api/dsh-tavern/vendor/runtime-assets/zod/index.mjs",document.baseURI).href)', 'Promise.resolve({})'), context)
   }
   return { state, context, reports, handlers, parent }
 }
@@ -91,4 +91,15 @@ test('预设自检面板按 TH-message 名称识别实际楼层，持久页面�
     update: client.createTavernHelperContextUpdate(null, next, 1, 2) } })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(detect(), 1)
+})
+
+test('状态栏头像读取可调用 SillyTavern.substituteParams，未支持的头像宏保持可识别', async () => {
+  const run = frame(false)
+  const [variables, avatar] = await Promise.all([
+    Promise.resolve(run.context.getVariables({type:'message'})),
+    vm.runInContext("SillyTavern.substituteParams('{{userAvatarPath}}')", run.context)
+  ])
+  assert.equal(variables.stat_data.hp,10)
+  assert.equal(avatar,'{{userAvatarPath}}')
+  assert.equal(vm.runInContext("SillyTavern.substituteParams('{{user}}与{{char}}')",run.context),'你与角色')
 })

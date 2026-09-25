@@ -20,7 +20,7 @@ function walk(node) {
 walk(tree)
 
 test('all pre-game Markdown call sites support links without a Session file resolver', () => {
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 1)
   const projection = { parts: [{ kind: 'markdown', text: '[说明](https://example.com)' }] }
   for (const call of calls) {
     const sandbox = {

@@ -1,7 +1,9 @@
+import { worldbookPlacement } from './worldbook-placement.js'
+import { entryRandom, renderWorldbookRandom } from './worldbook-random.js'
 import { projectAgentContent } from './runtime-content-projection.js'
 import { lastTavernHelperVariables } from './tavern-helper-context.js'
+import { activateWorldBook, promptOrder, worldBookSettings } from './worldbook-activation.js'
 
-const DYNAMIC_ENTRY_LIMIT = 3
 const READ_COOLDOWN_TURNS = 10
 
 function str(value) {
@@ -51,7 +53,12 @@ function templateBody(value) {
 }
 
 function templateResource(entry, book) {
+  const { rawEntry, ...view } = entry
   return {
+    ...view,
+    uid: entry.sourceUid ?? entry.ref,
+    world: str(book),
+    key: entry.primaryKeys || [], keysecondary: entry.secondaryKeys || [], disable: entry.enabled === false,
     id: str(entry.sourceUid ?? entry.ref),
     name: str(entry.title || entry.comment),
     comment: str(entry.comment || entry.title),
@@ -70,79 +77,13 @@ function transcriptOf(chat) {
 }
 
 export function isMvuUpdateEntry(entry) {
-  return /^\s*\[mvu_update\]/i.test(str(entry && (entry.comment || entry.title || entry.name)))
+  return /^\s*(?:\d+[a-z]?[_\s.-]*)?\[mvu_update\]/i.test(str(entry && (entry.comment || entry.title || entry.name)))
 }
 
 export function mvuUpdateRulesFromWorldBook(worldBook) {
   return enabledEntries(worldBook).filter(isMvuUpdateEntry).map(function (entry) {
     return str(entry.content).trim()
   })
-}
-
-function tavernOrder(entries) {
-  return entries.map(function (entry, index) { return { entry, index } }).sort(function (left, right) {
-    const order = (Number(right.entry.order) || 0) - (Number(left.entry.order) || 0)
-    if (order !== 0) return order
-    const display = (Number(left.entry.displayIndex) || 0) - (Number(right.entry.displayIndex) || 0)
-    return display !== 0 ? display : left.index - right.index
-  }).map(function (item) { return item.entry })
-}
-
-function latestBody(chat) {
-  const messages = Array.isArray(chat && chat.messages) ? chat.messages : []
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]
-    if (!message || message.role !== 'assistant') continue
-    const text = (str(message.sourceText) || str(message.text)).trim()
-    if (text !== '') return text
-  }
-  return ''
-}
-
-function regexKey(value) {
-  const match = /^\/(.*)\/([dgimsuvy]*)$/.exec(str(value))
-  if (!match) return null
-  try {
-    return new RegExp(match[1], match[2].replaceAll('g', '').replaceAll('y', ''))
-  } catch (_error) {
-    return null
-  }
-}
-
-function literalMatch(text, key, entry) {
-  const sensitive = entry.caseSensitive === true
-  const source = sensitive ? text : text.toLocaleLowerCase()
-  const needle = sensitive ? key : key.toLocaleLowerCase()
-  if (needle === '') return false
-  if (entry.matchWholeWords !== true) return source.includes(needle)
-  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  try {
-    return new RegExp('(^|[^\\p{L}\\p{N}_])' + escaped + '(?=$|[^\\p{L}\\p{N}_])', 'u').test(source)
-  } catch (_error) {
-    return source.includes(needle)
-  }
-}
-
-function keyMatch(text, value, entry) {
-  const key = str(value).trim()
-  if (key === '') return false
-  const regex = regexKey(key)
-  if (regex !== null) return regex.test(text)
-  return literalMatch(text, key, entry)
-}
-
-function keywordMatch(entry, body) {
-  const primary = (Array.isArray(entry.primaryKeys) ? entry.primaryKeys : []).filter(function (key) { return str(key).trim() !== '' })
-  if (primary.length === 0 || !primary.some(function (key) { return keyMatch(body, key, entry) })) return false
-  const secondary = (Array.isArray(entry.secondaryKeys) ? entry.secondaryKeys : []).filter(function (key) { return str(key).trim() !== '' })
-  if (entry.selective !== true || secondary.length === 0) return true
-  const matches = secondary.map(function (key) { return keyMatch(body, key, entry) })
-  switch (Number(entry.selectiveLogic) || 0) {
-    case 1: return !matches.every(Boolean)
-    case 2: return !matches.some(Boolean)
-    case 3: return matches.every(Boolean)
-    default: return matches.some(Boolean)
-  }
 }
 
 function readRecord(chat, entry) {
@@ -172,9 +113,9 @@ function readRecorder(entries, turn) {
   }
 }
 
-/** Constant Tavern entries are part of the stable play prefix and never enter cooldown. */
+/** Snapshot constant content; request projection partitions mixed positions separately. */
 export function constantWorldBookContext(input = {}) {
-  const entries = tavernOrder(enabledEntries(input.worldBook).filter(function (entry) {
+  const entries = promptOrder(enabledEntries(input.worldBook).filter(function (entry) {
     return entry.constant === true && !isMvuUpdateEntry(entry) && !isWorldBookTemplateEntry(entry)
   }))
   return {
@@ -185,68 +126,114 @@ export function constantWorldBookContext(input = {}) {
   }
 }
 
+/** Let the upstream plugin preprocess/filter its decorators before native keyword selection. */
+export async function prepareTemplateWorldbook(worldBook, runtime, chat, globals = {}) {
+  if (!worldBook?.view || worldBook.templatePrepared || !runtime.prepareWorldbook) return worldBook
+  const entries = allEntries(worldBook)
+  if (!entries.some(entry => /@@|\[(?:GENERATE:|RENDER:|InitialVariables|Preprocessing)|@INJECT/.test(entry.content + '\n' + (entry.comment || entry.title)))) return worldBook
+  const result = await runtime.prepareWorldbook(entries.map(entry => templateResource(entry, worldBook.view.displayName)), {
+    worldBookEntries: entries.map(entry => templateResource(entry, worldBook.view.displayName)),
+    scopes: {global: globals, local: chat.variables || {}, initial: chat.promptTemplateInitialVariables || {}, message: lastTavernHelperVariables(chat.promptTemplateInput?.message ? [chat.promptTemplateInput.message] : chat.messages) || {}}
+  })
+  const transformed = result.entries.flatMap(entry => {
+    const original = entries.find(item => String(item.sourceUid ?? item.ref) === String(entry.uid))
+    return original ? [{ ...original, ...entry, ref: original.ref, content: entry.content, enabled: !entry.disable, primaryKeys: entry.key || [], secondaryKeys: entry.keysecondary || [], constant: original.constant }] : []
+  })
+  return { ...worldBook, templatePrepared: true, templateScopes: result.scopes, templateActivationRequests: (result.activationRequests || []).map(request => ({...request, sourceRef:"[GENERATE:BEFORE]"})), view: { ...worldBook.view, entries: transformed } }
+}
+
 /** Resolve enabled constant EJS controllers for one request.
  * includeConstants also projects plain entries and shares their macro state with
  * the caller, so constant setters can feed subsequently recalled entries.
  * Disabled entries remain addressable by getwi(), but never activate themselves.
  * Scope mutations stay inside this read-only projection and cannot change Chat state.
  */
-export function projectWorldBookTemplates(input = {}) {
+export async function projectWorldBookTemplates(input = {}) {
   const runtime = input.runtime
   if (!runtime || typeof runtime.render !== 'function') throw new Error('缺少世界书模板运行时')
   const resources = allEntries(input.worldBook)
-  const controllers = tavernOrder(resources.filter(function (entry) {
-    return entry.enabled !== false && entry.constant === true && !isMvuUpdateEntry(entry) && (input.includeConstants === true || isWorldBookTemplateEntry(entry))
+  const controllers = promptOrder((input.selectedEntries || resources).filter(function (entry) {
+    return (entry.enabled !== false || (input.activationRequests || []).some(request => request.ref === entry.ref && request.force)) && (input.selectedEntries || entry.constant === true) && !isMvuUpdateEntry(entry) && (input.includeConstants === true || isWorldBookTemplateEntry(entry))
   }))
-  let scopes = {
+  const { foregroundRefs, prefixRefs } = worldbookPlacement([...resources.filter(entry => !isMvuUpdateEntry(entry)), ...controllers.filter(entry => entry.enabled === false).map(entry => ({ ...entry, enabled: true }))])
+  const projectedEntries = []
+  let scopes = input.worldBook?.templateScopes || {
     global: clone(input.globalVariables || {}),
     initial: clone(input.chat && input.chat.promptTemplateInitialVariables || {}),
     local: clone(input.chat && input.chat.variables || {}),
-    message: lastTavernHelperVariables(input.chat && input.chat.messages) || {}
+    message: lastTavernHelperVariables(input.chat?.promptTemplateInput?.message ? [input.chat.promptTemplateInput.message] : input.chat && input.chat.messages) || {}
   }
   let macroState = clone(input.chat?.macroState || {})
   const context = []
   const refs = []
   const diagnostics = []
+  const activationRequests = []
   const templateContext = {
     charName: str(input.card && input.card.name),
     userName: str(input.chat && input.chat.macroState && input.chat.macroState.userName) || '你',
     runType: 'generate',
     generateType: str(input.generateType),
     transcript: transcriptOf(input.chat),
+    worldBookSettings: worldBookSettings(input.worldBook),
+    worldBookRandom: input.random,
     worldBookEntries: resources.map(function (entry) {
-      return templateResource(entry, input.worldBook && input.worldBook.view && input.worldBook.view.displayName)
+      // Template content is read from the executor's authoritative environment.
+      // This list only maps upstream activations back to Tavern entry references.
+      return { uid: entry.sourceUid ?? entry.ref, id: str(entry.sourceUid ?? entry.ref),
+        ref: entry.ref, world: str(input.worldBook?.view?.displayName) }
     })
   }
+  const templates = controllers.filter(isWorldBookTemplateEntry)
+  // Plain entries only affect the host macro state below, not template scopes.
+  // Keep their output interleaved in the original order after the batch returns.
+  const useBatch = templates.length > 0 && typeof runtime.renderProjections === 'function'
+  const batch = useBatch
+    ? await runtime.renderProjections(templates.map(entry => ({ template: templateBody(entry.content), randomRef: entry.ref })),
+      { ...templateContext, scopes, randomSeed: input.randomSeed }) : null
+  if (useBatch && (!Array.isArray(batch) || batch.length !== templates.length || batch.some(result => typeof result?.ok !== 'boolean'))) {
+    const error = new Error('世界书模板批量结果不完整，请刷新酒馆页面后重试')
+    error.code = 'FULL_TEMPLATE_UNAVAILABLE'
+    throw error
+  }
+  let templateIndex = 0
   for (const entry of controllers) {
+    const random = input.randomSeed ? entryRandom(input.randomSeed, entry.ref) : (input.random || Math.random)
     const result = isWorldBookTemplateEntry(entry)
-      ? runtime.render(templateBody(entry.content), Object.assign({}, templateContext, { scopes }))
+      ? batch ? batch[templateIndex++] : await (runtime.renderProjection || runtime.render).call(runtime, templateBody(entry.content), Object.assign({}, templateContext, { scopes, randomSeed: input.randomSeed, randomRef: entry.ref }))
       : { ok: true, text: entry.content, scopes }
     if (!result.ok) {
       diagnostics.push({ kind: 'worldbook-template', code: result.kind, ref: str(entry.ref) })
       continue
     }
-    scopes = clone(result.scopes)
+    for (let count = 0; count < (result.randomCalls || 0); count++) random()
+    activationRequests.push(...(result.activationRequests || []).map(request => ({ ...request, sourceRef: entry.ref })))
+    if (!useBatch) scopes = clone(result.scopes)
     const projected = input.includeConstants === true
-      ? projectAgentContent(result.text, { charName: str(input.card?.name), macroState }) : null
+      ? projectAgentContent(renderWorldbookRandom(result.text, random), { charName: str(input.card?.name), macroState }) : null
     if (projected) macroState = projected.macroState
-    const text = str(projected ? projected.agentText : result.text).trim()
+    const text = str(input.randomOutputs?.[entry.ref] ?? (projected ? projected.agentText : result.text)).trim()
     if (text === '') continue
     context.push(text)
+    projectedEntries.push({ ...entry, content: text })
     refs.push(str(entry.ref))
   }
   return {
     context: context.join('\n\n'),
+    renderedEntries: projectedEntries.map(entry => ({ ref: entry.ref, text: entry.content, location: foregroundRefs.has(entry.ref) ? 'foreground' : 'prefix', ...(foregroundRefs.has(entry.ref) && prefixRefs.has(entry.ref) ? { alsoInPrefix: true } : {}) })),
+    prefixContext: projectedEntries.filter(entry => prefixRefs.has(entry.ref)).map(entry => entry.content).join('\n\n'),
+    foregroundContext: projectedEntries.filter(entry => foregroundRefs.has(entry.ref)).map(entry => entry.content).join('\n\n'),
     refs,
     diagnostics,
     evaluated: controllers.length,
+    activationRequests,
     ...(input.includeConstants === true ? { dynamicConstants: true, macroState } : {})
   }
 }
 
-/** Deterministically activate at most three non-constant entries for the next foreground turn. */
+/** Select non-constant entries within a token budget; retain the existing ten-turn cooldown. */
 export function prepareWorldBookRecall(input = {}) {
-  const all = enabledEntries(input.worldBook).filter(function (entry) { return !isMvuUpdateEntry(entry) })
+  const forced = new Set((input.activationRequests || []).filter(request => request.force).map(request => request.ref))
+  const all = allEntries(input.worldBook).filter(entry => (entry.enabled !== false || forced.has(entry.ref)) && str(entry.content).trim() && !isMvuUpdateEntry(entry))
   const emptyRecorder = readRecorder([], input.turn)
   if (!input.worldBook || !input.worldBook.view) {
     return { kind: 'skip', context: '', refs: [], totalChars: 0, reason: 'unbound', recordReads: emptyRecorder }
@@ -255,12 +242,15 @@ export function prepareWorldBookRecall(input = {}) {
     return { kind: 'skip', context: '', refs: [], totalChars: 0, reason: 'empty', recordReads: emptyRecorder }
   }
   const totalChars = all.reduce(function (total, entry) { return total + charCount(entry.content) }, 0)
-  const body = str(input.latestBody) || latestBody(input.chat)
-  const selected = tavernOrder(all.filter(function (entry) {
-    return entry.constant !== true && !isCoolingDown(input.chat, entry, input.turn) && keywordMatch(entry, body)
-  })).slice(0, DYNAMIC_ENTRY_LIMIT)
+  const activation = activateWorldBook({ ...input, entries: all, isCoolingDown: entry => isCoolingDown(input.chat, entry, input.turn) })
+  const selected = promptOrder(activation.entries.filter(entry => entry.constant !== true))
   return {
     kind: 'keywords',
+    entries: activation.entries,
+    diagnostics: activation.diagnostics,
+    settings: activation.settings,
+    budget: activation.budget,
+    scanSources: activation.scanSources,
     context: selected.map(function (entry) { return str(entry.content).trim() }).filter(Boolean).join('\n\n'),
     refs: selected.map(function (entry) { return str(entry.ref) }),
     totalChars,

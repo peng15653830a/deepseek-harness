@@ -128,3 +128,51 @@ test('预设目录公开前中后三段数量，不再只给无法判断位置�
   assert.deepEqual(item.phaseCounts, { front: 1, middle: 1, back: 1 })
   assert.equal(item.unassignedPromptCount, 2)
 })
+
+test('条目跨段与段内移动持久化到预设，重启后运行顺序一致且保留原文', async () => {
+  const h = harness(), library = h.create()
+  const original = { prompts: [
+    { identifier: 'a', content: '甲', unknown: 1 },
+    { identifier: 'b', content: '乙', enabled: false },
+    { identifier: 'c', content: '丙' }
+  ], extensions: { custom: { retain: true } }, dsh_tavern: { other: 42 } }
+  h.files.set(path, JSON.stringify(original))
+  let preset = await library.detail(path)
+  preset = await library.moveEntry(path, 'c#1', 'front', 'a#1', preset.revision)
+  assert.deepEqual(preset.dshPreset.front.map(e => e.content), ['丙', '甲', '乙'])
+  await library.select(path)
+  assert.equal((await library.runtime.fullSnapshot()).front.text, '丙\n\n甲')
+  const stale = preset.revision
+  preset = await library.moveEntry(path, 'a#1', 'middle', '', preset.revision)
+  assert.deepEqual(preset.dshPreset.middle.map(e => e.content), ['甲'])
+  await assert.rejects(library.moveEntry(path, 'b#1', 'back', '', stale), /预设已变化/)
+  preset = await library.moveEntry(path, 'b#1', 'back', '', preset.revision)
+  assert.equal(preset.dshPreset.back[0].enabled, false)
+  const saved = JSON.parse(h.files.get(path))
+  assert.deepEqual(saved.prompts, original.prompts)
+  assert.deepEqual(saved.extensions, original.extensions)
+  assert.equal(saved.dsh_tavern.other, 42)
+  const restored = h.create()
+  await restored.select(path)
+  const snapshot = await restored.runtime.fullSnapshot()
+  assert.equal(snapshot.front.text, '丙')
+  assert.equal(snapshot.middle.text, '甲')
+  assert.equal(snapshot.back.text, '')
+  assert.deepEqual((await restored.detail(path)).dshPreset.back.map(e => e.content), ['乙'])
+})
+
+test('移动拒绝系统占位及无效分段，同名标识条目不会丢失', async () => {
+  const h = harness(), library = h.create()
+  h.files.set(path, JSON.stringify({ prompts: [{ identifier: 'same', content: '第一项' }, { identifier: 'same', content: '第二项' }, { identifier: 'chatHistory', marker: true }] }))
+  let preset = await library.detail(path)
+  await assert.rejects(library.moveEntry(path, 'chatHistory#1', 'back', '', preset.revision), /只能移动/)
+  await assert.rejects(library.moveEntry(path, 'same#1', 'invalid', '', preset.revision), /无效/)
+  preset = await library.moveEntry(path, 'same#2', 'back', '', preset.revision)
+  assert.deepEqual(preset.dshPreset.front.map(e => e.content), ['第一项'])
+  assert.deepEqual(preset.dshPreset.back.map(e => e.content), ['第二项'])
+})
+
+test('列出后文件消失时跳过缺失预设', async () => {
+  const library = createPresetLibrary({ resources: { list: async () => ['presets/gone.json'], readText: async () => undefined }, state: { readJson: async () => undefined } })
+  assert.deepEqual((await library.catalog()).presets, [])
+})

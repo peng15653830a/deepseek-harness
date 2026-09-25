@@ -1,3 +1,4 @@
+import { postureForContext } from './posture-context.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { projectAgentContent } from './runtime-content-projection.js'
 import { createImageGenerationModule } from '../../../image-gen/src/module.js'
@@ -66,7 +67,7 @@ export function sceneTarget(chat, turn) {
   if (!Number.isSafeInteger(turn) || turn < 1) throw new Error('正文轮次不合法')
   if (!chat || !['story', 'script'].includes(chat.mode || 'story')) throw new Error('请先打开游玩对话')
   const index = (chat.messages || []).findIndex(message => message?.role === 'assistant' && Number(message.turn || (message.greeting ? 1 : 0)) === Number(turn))
-  if (index < 0) throw new Error('这段正文已不存在')
+  if (index < 0) throw Object.assign(new Error('这段正文已不存在'), { code: 'SCENE_TARGET_UNAVAILABLE' })
   const message = chat.messages[index]
   const swipeId = Math.max(0, Number(message.swipeId) || 0)
   const source = String(message.swipes?.[swipeId] ?? message.sourceText ?? message.text ?? '')
@@ -94,13 +95,16 @@ export function sceneInput(chat, target, stateAtTarget) {
   // No historical snapshot means no historical posture; never borrow the latest
   // game's pose to illustrate an earlier turn.
   const snapshot = stateAtTarget || (latestTurn === target.turn && chat.settleStatus === 'done' ? chat : null)
-  const posture = typeof snapshot?.posture === 'string' ? snapshot.posture : ''
+  const posture = postureForContext(chat, snapshot)
   const state = sceneStateSources(snapshot, target, text + '\n' + posture)
   return { text, posture, ...(state.sources.length || state.omitted.length ? { state } : {}) }
 }
 
-function sceneLineage(chat, target) {
-  return (chat.messages || []).filter(item => item.role === 'assistant' && Number(item.turn || (item.greeting ? 1 : 0)) <= target.turn)
+function sceneLineage(chat, target, turns) {
+  return (chat.messages || []).filter(item => {
+    const turn = Number(item.turn || (item.greeting ? 1 : 0))
+    return item.role === 'assistant' && turn <= target.turn && (!turns || turns.has(turn))
+  })
     .map(item => sceneTarget(chat, Number(item.turn || 1)))
 }
 function sceneSources(chat, target, snapshot, sinceTurn = target.turn) {
@@ -155,8 +159,17 @@ export function createSceneIllustrations(deps) {
   const imageQueue = createSceneImageQueue(deps)
   const imageReferences = createSceneImageReferences({ store: deps.store })
   const pathFor = (chatId, key) => 'scene-images/' + hash(String(chatId)) + '/' + key + '.json'
-  async function resolve(sessionId, turn) {
-    const chat = await deps.chatForSession(sessionId)
+  // Coalesce simultaneous display reads; never cache across completed reads or mutations.
+  const statusReads = new Map()
+  function readStatusChat(sessionId) {
+    if (!statusReads.has(sessionId)) {
+      const pending = Promise.resolve().then(() => deps.chatForSession(sessionId)).finally(() => statusReads.delete(sessionId))
+      statusReads.set(sessionId, pending)
+    }
+    return statusReads.get(sessionId)
+  }
+  async function resolve(sessionId, turn, readChat = id => deps.chatForSession(id)) {
+    const chat = await readChat(sessionId)
     const target = sceneTarget(chat, turn)
     return { chat, target, path: pathFor(chat.id, target.key) }
   }
@@ -176,17 +189,22 @@ export function createSceneIllustrations(deps) {
     const configuration = value => value?.workflow ? { ...value, workflow: { name: value.workflow.name, digest: value.workflow.digest } } : value
     // A batch shot plans under a shot-qualified profile key; readers only know the base one.
     const baseProfile = value => typeof value !== 'string' ? '' : value.split('#shot')[0]
-    return { key: target.key, turn: target.turn, status: 'idle', ...publicRecord, ...(publicRecord.configuration ? { configuration: configuration(publicRecord.configuration) } : {}), versions: versionsOf(record).map(({ attachment, plan, ...item }) => ({ ...item, configuration: configuration(item.configuration), description: plan?.description || '', profile: baseProfile(plan?.profile || ''),
+    return { key: target.key, turn: target.turn, status: 'idle', ...publicRecord, hasDeletedImages: Boolean(deletedVersions?.length), ...(publicRecord.configuration ? { configuration: configuration(publicRecord.configuration) } : {}), versions: versionsOf(record).map(({ attachment, plan, ...item }) => ({ ...item, configuration: configuration(item.configuration), description: plan?.description || '', profile: baseProfile(plan?.profile || ''),
       referencePeople: imageReferencePeople({ plan }),
       referenceSingle: plan?.subjects?.length === 1 && imageReferencePeople({ plan }).length === 1,
       referencePerson: plan?.people?.length === 1 && plan.subjects?.length === 1 && imageReferencePeople({ plan }).length === 1 ? plan.people[0].name : '' })) }
   }
   async function status(sessionId, turn) {
-    const { chat, target, path } = await resolve(sessionId, turn)
+    let resolved
+    try { resolved = await resolve(sessionId, turn, readStatusChat) } catch (error) {
+      if (error.code !== 'SCENE_TARGET_UNAVAILABLE') throw error
+      return { turn: Number(turn), status: 'unavailable', reason: 'target-unavailable', versions: [] }
+    }
+    const { chat, target, path } = resolved
     const current = await config()
     const last = [...chat.messages].reverse().find(item => item.role === 'assistant')
-    const reference = await imageReferences.select({ chatId: chat.id, lineage: sceneLineage(chat, sceneTarget(chat, Number(last.turn || 1))), config: current })
-    return { ...present(target, await readRecord(path)), enabled: current.enabled, profile: imageExpressionProfile(current),
+    const reference = await imageReferences.select({ chatId: chat.id, lineage: turns => sceneLineage(chat, { turn: Number(last.turn || 1) }, turns), config: current })
+    return { ...present(target, await readRecord(path)), enabled: typeof chat.sceneImagesEnabled === 'boolean' ? chat.sceneImagesEnabled : current.enabled, profile: imageExpressionProfile(current),
       reference: { ...reference.capability, warning: reference.warning,
         bindings: reference.active.filter(record => record.source.key === target.key).map(record => ({ versionId: record.source.versionId, personId: record.person.id, name: record.person.name })),
         versions: reference.active.filter(record => record.source.key === target.key).map(record => record.source.versionId) } }
@@ -195,7 +213,7 @@ export function createSceneIllustrations(deps) {
     const { chat, target, path } = await resolve(sessionId, turn)
     if (key !== target.key) throw new Error('正文版本已变化，请刷新后选择参考图')
     const active = await config()
-    if (enabled && !active.enabled) throw new Error('请先启用场景生图')
+    if (enabled && !(typeof chat.sceneImagesEnabled === 'boolean' ? chat.sceneImagesEnabled : active.enabled)) throw new Error('请先启用场景生图')
     const version = versionsOf(await readRecord(path)).find(item => item.id === versionId)
     if (!version?.attachment) throw new Error('参考图片不存在或已删除')
     const latest = [...chat.messages].reverse().find(item => item.role === 'assistant')
@@ -220,14 +238,17 @@ export function createSceneIllustrations(deps) {
     return written
   }
   function watchCancellation(path, record, controller) {
-    let checking = false
+    let checking = false, warned = false
     const timer = setInterval(async () => {
       if (checking) return
       checking = true
       try {
         const current = await deps.store.readJson(path)
         if (!current || current.requestId !== record.requestId || current.ownerId !== record.ownerId || current.cancelRequestedAt) controller.abort()
-      } catch { controller.abort() } finally { checking = false }
+      } catch {
+        // An unavailable store is not evidence of cancellation or lost ownership.
+        if (!warned) { warned = true; console.warn('dsh-tavern: 生图取消状态读取失败，将继续检查') }
+      } finally { checking = false }
     }, 250)
     return () => clearInterval(timer)
   }
@@ -273,7 +294,7 @@ export function createSceneIllustrations(deps) {
       const existing = await readRecord(path)
       if (existing?.recovery === 'save') throw new Error('图片已生成，请先重试保存；不会再次请求图片渠道')
       const { active, apiKey } = await capture()
-      if (!active.enabled) throw new Error('请先在设置 → DSH Tavern → 场景生图中手动启用')
+      if (!(typeof chat.sceneImagesEnabled === 'boolean' ? chat.sceneImagesEnabled : active.enabled)) throw new Error('请先在本局设置中开启场景生图')
       if (await deps.isRunning?.(sessionId)) throw new Error('请等待当前正文生成完成后再生图')
       if (Object.hasOwn(existing?.requests || {}, requestId) || (kind === 'generate' && existing?.status === 'succeeded' && !automatic) || existing?.status === 'running' && (jobs.has(path) || ownerIsLive(existing, path))) return present(target, existing)
       checkPurchaseConfirmation(existing, options)
@@ -281,7 +302,7 @@ export function createSceneIllustrations(deps) {
       // An explicit retry waits for that cleanup, rather than returning the old failure.
       if (jobs.has(path)) await jobs.get(path).promise
       if (!channelReady(active, apiKey)) throw new Error('请先在设置中完成生图渠道配置（地址、模型或 API Key）')
-      const selectedImageReferences = await imageReferences.select({ chatId: chat.id, lineage: sceneLineage(chat, target), config: active })
+      const selectedImageReferences = await imageReferences.select({ chatId: chat.id, lineage: turns => sceneLineage(chat, target, turns), config: active })
       if (typeof deps.attachments()?.saveImage !== 'function' || typeof deps.attachments()?.readImage !== 'function') throw new Error('当前 DSH 未提供图片附件服务，无法保存插画')
       const profile = imageExpressionProfile(active)
       // Every shot of a batch owns its planned frame; the suffix keeps a later shot's
@@ -464,7 +485,7 @@ export function createSceneIllustrations(deps) {
             record.traceSessionId = sessionId
             await writeJob(path, record)
           },
-          selection: input.selection, system: input.adjustment ? readSceneAdjustmentInstruction() : readScenePlanInstruction(), signal: controller.signal,
+          selection: input.selection, system: deps.prompt ? deps.prompt(input.adjustment ? 'scene-image-adjustment' : 'scene-plan') : (input.adjustment ? readSceneAdjustmentInstruction() : readScenePlanInstruction()), signal: controller.signal,
           messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify({ ...input.prepared.input,
             ...(record.planDraft ? { draft: sceneDraftSummary(draft) } : {}) }) }] }],
           turnContext: '', tools: [...(input.adjustment ? [SCENE_ADJUSTMENT_TOOL] : SCENE_DRAFT_TOOLS), CHARACTER_DESIGN_READ_TOOL,

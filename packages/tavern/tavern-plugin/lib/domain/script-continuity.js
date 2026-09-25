@@ -1,3 +1,5 @@
+import { chunkOffsets, scriptForState } from './script-layout.js'
+
 function str(value) {
   return typeof value === 'string' ? value : (value === undefined || value === null ? '' : String(value))
 }
@@ -56,26 +58,65 @@ function openingCursor(script, opening) {
   return best.hits >= 3 && best.score >= 0.08 ? best.cursor : 0
 }
 
+function migrateChunkPosition(script, state) {
+  if (!script?.chunkingVersion || state.chunkingVersion === script.chunkingVersion || !Array.isArray(script.legacyChunkStarts)) return state
+  const starts = script.chunkStarts, old = script.legacyChunkStarts
+  function position(value) {
+    const index = Math.max(0, Math.floor(Number(value) || 0))
+    if (index >= old.length) return starts.length
+    const offset = old[index]
+    let low = 0, high = starts.length
+    while (low < high) { const middle = (low + high) >>> 1; if (starts[middle] <= offset) low = middle + 1; else high = middle }
+    return Math.max(0, low - 1)
+  }
+  function reference(value) {
+    if (!value || value.chunkingVersion === script.chunkingVersion) return value
+    const before = Number(value.cursorBefore ?? value.order) || 0
+    const cursor = position(before)
+    return { ...value, order: cursor, cursorBefore: cursor, cursorAfter: position(before + 1),
+      chunkId: value.ended ? '' : (script.chunks[cursor]?.id || ''), chunkingVersion: script.chunkingVersion }
+  }
+  return { ...state, cursor: position(state.cursor), initialCursor: position(state.initialCursor),
+    recalledChunkIds: [...new Set((Array.isArray(state.recalledChunkIds) ? state.recalledChunkIds : []).map(id => {
+      const match = /^chunk-(\d+)$/.exec(id)
+      return match ? script.chunks[position(Number(match[1]) - 1)]?.id : id
+    }).filter(Boolean))], prepared: reference(state.prepared), lastReference: reference(state.lastReference), chunkingVersion: script.chunkingVersion }
+}
+
+function cursorAt(offsets, offset) {
+  let low = 0, high = offsets.length
+  while (low < high) { const mid = (low + high) >>> 1; if (offsets[mid] <= offset) low = mid + 1; else high = mid }
+  return Math.max(0, low - 1)
+}
+
 function normalizedState(script, source) {
+  script = scriptForState(script, source)
   const chunks = chunksOf(script)
   const total = chunks.length
-  const incoming = source !== null && typeof source === 'object' ? clone(source) : {}
+  let incoming = source !== null && typeof source === 'object' ? clone(source) : {}
+  if ((Number(incoming.scriptVersion) || 0) === scriptVersion(script)) incoming = migrateChunkPosition(script, incoming)
   const initialCursor = Math.max(0, Math.min(Math.max(0, total - 1), Number(incoming.initialCursor) || 0))
   const version = scriptVersion(script)
   if ((Number(incoming.scriptVersion) || 0) !== version) {
     return {
       cursor: initialCursor,
+      sourceOffset: chunkOffsets(chunks)[initialCursor] || 0,
+      ...(incoming.chunkSize ? { chunkSize: incoming.chunkSize } : {}),
       initialCursor,
       recalledChunkIds: [],
       prepared: null,
       lastReference: null,
       totalChunks: total,
       title: str(script && script.title),
-      scriptVersion: version
+      scriptVersion: version, ...(script?.chunkingVersion ? { chunkingVersion: script.chunkingVersion } : {})
     }
   }
   // cursor === total 是明确的“剧本已结束”位置；不能钳回最后一块，否则末块会被无限重复。
-  incoming.cursor = Math.max(0, Math.min(total, Number(incoming.cursor) || 0))
+  const offsets = chunkOffsets(chunks)
+  incoming.sourceOffset = Number.isSafeInteger(incoming.sourceOffset)
+    ? Math.max(0, Math.min(offsets[total], incoming.sourceOffset))
+    : offsets[Math.max(0, Math.min(total, Number(incoming.cursor) || 0))]
+  incoming.cursor = cursorAt(offsets, incoming.sourceOffset)
   incoming.initialCursor = initialCursor
   incoming.recalledChunkIds = Array.isArray(incoming.recalledChunkIds) ? incoming.recalledChunkIds.filter(function (id) { return typeof id === 'string' }) : []
   incoming.prepared = incoming.prepared !== null && typeof incoming.prepared === 'object' ? incoming.prepared : null
@@ -161,7 +202,7 @@ export function createScriptContinuity() {
       recalledChunkIds: [],
       prepared: null,
       lastReference: null,
-      scriptVersion: scriptVersion(script)
+      scriptVersion: scriptVersion(script), ...(script?.chunkingVersion ? { chunkingVersion: script.chunkingVersion } : {})
     })
   }
 
@@ -172,11 +213,18 @@ export function createScriptContinuity() {
   }
 
   function transition(input) {
-    const script = input && input.script
+    const script = scriptForState(input && input.script, input && input.state)
     const event = input && input.event
     if (event === null || typeof event !== 'object') throw new Error('缺少剧本状态转换事件')
     const state = normalizedState(script, input && input.state)
     const chunks = chunksOf(script)
+
+    if (event.kind === 'set-chunk-size') {
+      if (state.prepared !== null) throw new Error('请等待本轮任务结束后再修改推进字数')
+      if (!Number.isSafeInteger(event.chunkSize) || event.chunkSize < 100 || event.chunkSize > 10000) throw new Error('每轮推进字数须为 100–10000 的整数')
+      const next = normalizedState(script, { ...state, chunkSize: event.chunkSize })
+      return { state: next, changed: (state.chunkSize || 500) !== event.chunkSize }
+    }
 
     if (event.kind === 'prepare') {
       const userText = str(event.userText).trim()
@@ -198,13 +246,27 @@ export function createScriptContinuity() {
           ended: false,
           chunkId: selected.id,
           order: selected.order,
-          text: selected.text,
+          text: selected.text.slice(state.sourceOffset - chunkOffsets(chunks)[state.cursor]),
+          sourceOffsetBefore: state.sourceOffset,
+          sourceOffsetAfter: chunkOffsets(chunks)[state.cursor + 1],
+          chunkSize: state.chunkSize || 500,
           cursorBefore: state.cursor,
           preparedAt: Date.now()
         }
       }
+      if (script?.chunkingVersion) reference.chunkingVersion = script.chunkingVersion
       state.prepared = reference
       return { state, reference: clone(reference), changed: true }
+    }
+
+    if (event.kind === 'manual-focus') {
+      if (state.prepared !== null) throw new Error('当前剧本回合尚未提交，不能调整下一轮游标')
+      if (!Number.isSafeInteger(event.cursor) || event.cursor < 1 || event.cursor > chunks.length) throw new Error('请选择有效的剧本块号')
+      const next = event.cursor - 1
+      const changed = next !== state.cursor || state.sourceOffset !== chunkOffsets(chunks)[next]
+      state.cursor = next
+      state.sourceOffset = chunkOffsets(chunks)[next]
+      return { state, changed }
     }
 
     if (event.kind === 'focus') {
@@ -216,6 +278,7 @@ export function createScriptContinuity() {
       const next = Math.max(state.cursor, requested)
       const changed = next !== state.cursor
       state.cursor = next
+      if (changed) state.sourceOffset = chunkOffsets(chunks)[next]
       return { state, changed }
     }
 
@@ -223,6 +286,7 @@ export function createScriptContinuity() {
       if (state.prepared !== null) throw new Error('当前剧本回合尚未提交，不能结束剧本游标')
       const changed = state.cursor !== chunks.length
       state.cursor = chunks.length
+      state.sourceOffset = chunkOffsets(chunks).at(-1)
       return { state, changed }
     }
 
@@ -240,9 +304,11 @@ export function createScriptContinuity() {
           order: Number(prepared.order) || 0,
           text: prepared.text,
           userText: str(event.userText),
+          ...(script?.chunkingVersion ? { chunkingVersion: script.chunkingVersion } : {}),
           recalledAt: Date.now()
         }
-        state.cursor = Math.min(chunks.length, Math.max(state.cursor, (Number(prepared.cursorBefore) || 0) + 1))
+        state.cursor = Math.min(chunks.length, Math.max(state.cursor, (Number.isInteger(prepared.cursorAfter) ? prepared.cursorAfter : (Number(prepared.cursorBefore) || 0) + 1)))
+        state.sourceOffset = Number.isSafeInteger(prepared.sourceOffsetAfter) ? prepared.sourceOffsetAfter : chunkOffsets(chunks)[state.cursor]
       }
       state.prepared = null
       return { state, reference, revision, changed: true }
@@ -254,10 +320,13 @@ export function createScriptContinuity() {
         restored.prepared = null
         return { state: restored, changed: true }
       }
-      const reference = event.reference
+      const referenceScript = scriptForState(input.script, event.reference?.chunkSize ? { chunkSize: event.reference.chunkSize } : null)
+      const reference = referenceScript?.chunkingVersion && event.reference && !event.reference.chunkingVersion
+        ? migrateChunkPosition(referenceScript, { prepared: event.reference }).prepared : event.reference
       state.prepared = null
       if (reference !== null && typeof reference === 'object' && reference.ended !== true && str(reference.chunkId) !== '') {
-        state.cursor = Math.max(0, Number(reference.cursorBefore) || 0)
+        state.sourceOffset = Number.isSafeInteger(reference.sourceOffsetBefore) ? reference.sourceOffsetBefore : chunkOffsets(chunksOf(referenceScript))[Math.max(0, Number(reference.cursorBefore) || 0)]
+        state.cursor = cursorAt(chunkOffsets(chunks), state.sourceOffset)
         state.recalledChunkIds = state.recalledChunkIds.filter(function (id) { return id !== reference.chunkId })
         state.lastReference = null
       }
@@ -268,19 +337,28 @@ export function createScriptContinuity() {
   }
 
   function inspect(input) {
-    const script = input && input.script
+    const script = scriptForState(input && input.script, input && input.state)
     const request = input && input.request
     if (request === null || typeof request !== 'object') throw new Error('缺少剧本读取请求')
     const state = normalizedState(script, input && input.state)
     const chunks = chunksOf(script)
 
+    if (request.kind === 'browse') {
+      const total = chunks.length
+      const position = request.position === undefined ? Math.min(total, state.cursor + 1) : request.position
+      if (total && (!Number.isSafeInteger(position) || position < 1 || position > total)) throw new Error('请输入有效的剧本块号')
+      const start = Math.max(0, Math.min(position - 5, total - 10))
+      return { cursor: state.cursor, totalChunks: total, scriptVersion: state.scriptVersion, chunkSize: state.chunkSize || 500, sourceOffset: state.sourceOffset,
+        from: total ? start + 1 : 0, to: Math.min(total, start + 10),
+        chunks: chunks.slice(start, start + 10).map((chunk, i) => ({ number: start + i + 1, text: str(chunk.text) })) }
+    }
     if (request.kind === 'info') return infoOf(script)
     if (request.kind === 'read') return readWindow(script, request.query, request.offset, request.limit)
     if (request.kind === 'play') return playWindow(script, state, request.query, request.offset, request.limit)
     if (request.kind === 'choice') {
       const cursor = Math.max(0, Number(state.cursor) || 0)
       const ended = cursor >= chunks.length
-      return { cursor, total: chunks.length, ended, title: str(script && script.title), chunks: ended ? [] : chunks.slice(cursor, cursor + 1) }
+      return { cursor, sourceOffset: state.sourceOffset, chunkSize: state.chunkSize || 500, total: chunks.length, ended, title: str(script && script.title), chunks: ended ? [] : [{ ...chunks[cursor], text: chunks[cursor].text.slice(state.sourceOffset - chunkOffsets(chunks)[cursor]) }] }
     }
     if (request.kind === 'preview') {
       const cursor = Math.max(0, Math.min(chunks.length, Number(state.cursor) || 0))
@@ -289,7 +367,7 @@ export function createScriptContinuity() {
         : null
       return {
         title: str(script && script.title), cursor, totalChunks: chunks.length, previous,
-        upcoming: chunks.slice(cursor, cursor + 3).map(function (chunk) { return { order: Number(chunk.order) || 0, id: chunk.id, text: str(chunk.text) } })
+        upcoming: chunks.slice(cursor, cursor + 3).map(function (chunk, index) { return { order: Number(chunk.order) || 0, id: chunk.id, text: index === 0 ? str(chunk.text).slice(state.sourceOffset - chunkOffsets(chunks)[cursor]) : str(chunk.text) } })
       }
     }
     if (request.kind === 'progress') {
@@ -297,6 +375,8 @@ export function createScriptContinuity() {
         cursor: Number(state.cursor) || 0,
         totalChunks: chunks.length,
         recalledCount: state.recalledChunkIds.length,
+        chunkSize: state.chunkSize || 500,
+        sourceOffset: state.sourceOffset,
         title: str(script && script.title)
       }
     }

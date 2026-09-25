@@ -217,6 +217,19 @@ test('悬浮角色库读取当前人物卡名称，并随宿主上下文更新',
   assert.equal(run.window.getCurrentCharacterName(), '新卡')
 })
 
+test('旧聊天 MVU 清理提示静默拒绝，不弹窗、不修改或清理历史变量', async () => {
+  for (const content of [
+    '检测到可以清理本聊天文件中的旧变量以减小文件体积，是否清理？（备份会消耗较多内存，手机上建议关闭其他后台应用后进行，或在计算机上备份）',
+    'Old variables can be removed from this chat to reduce its file size. Clean them now? (Creating a backup uses considerable memory; on mobile, close other background apps first or create the backup on a computer.)'
+  ]) {
+    const run = helperHostHarness({ messages: [{ message_id: 0, variables: { stat_data: { hp: 10 } } }] })
+    const before = JSON.stringify(run.window.getVariables({ type: 'message', message_id: 0 }))
+    const result = await run.window.SillyTavern.callGenericPopup(content, 'confirm', '', {})
+    assert.equal(result, run.window.SillyTavern.POPUP_RESULT.NEGATIVE)
+    assert.equal(run.calls().length, 0)
+    assert.equal(JSON.stringify(run.window.getVariables({ type: 'message', message_id: 0 })), before)
+  }
+})
 
 test('script context exposes the bound character avatar and follows chat changes', () => {
   const run = helperHostHarness({ chatId: 'one', character: { name: 'A', path: 'cards/a.png' } })
@@ -295,4 +308,61 @@ test('旧 eventOnButton 按所属脚本注册同名按钮，等待异步回调�
   w.eventOff(a, handler)
   await w.eventEmit(a)
   assert.deepEqual(seen, ['a', 'b'])
+})
+
+test('事件清理接口仅清理当前脚本，支持别名、重复清理与重新注册', async () => {
+  const w = helperHostHarness().window, seen = []
+  w.eventOn('MESSAGE_RECEIVED', () => seen.push('a-old'))
+  w.__dshTavernHelperSetCurrentScript('b')
+  w.eventOn('MESSAGE_RECEIVED', () => seen.push('b'))
+  w.__dshTavernHelperSetCurrentScript('a')
+  w.eventClearEvent('message_received')
+  w.eventClearEvent('message_received')
+  w.eventOn('MESSAGE_RECEIVED', () => seen.push('a-new'))
+  await w.eventEmit('MESSAGE_RECEIVED')
+  assert.deepEqual(seen, ['b', 'a-new'])
+  const handler = () => seen.push('shared')
+  w.eventOn('one', handler)
+  w.eventOn('two', handler)
+  w.__dshTavernHelperSetCurrentScript('b')
+  w.eventOn('one', handler)
+  w.__dshTavernHelperSetCurrentScript('a')
+  w.eventClearListener(handler)
+  await w.eventEmit('one')
+  await w.eventEmit('two')
+  assert.deepEqual(seen, ['b', 'a-new', 'shared'])
+  w.eventClearAll()
+  seen.length = 0
+  await w.eventEmit('MESSAGE_RECEIVED')
+  await w.eventEmit('one')
+  assert.deepEqual(seen, ['b', 'shared'])
+})
+
+test('Helper 版本同步返回，await 调用及开场预览保持一致（issue 18）', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const w = helperHostHarness().window
+  const getVersion = w.getTavernHelperVersion
+  assert.equal(getVersion(), '4.8.19')
+  assert.equal(await getVersion(), '4.8.19')
+  assert.equal(w.TavernHelper.getTavernHelperVersion, getVersion)
+  const source = await readFile(new URL('../tavern-plugin/src/client/opening-preview.js', import.meta.url), 'utf8')
+  vm.runInNewContext(source + '\ninstallOpeningPreviewBridge("version-test", {runtime:true,swipes:["Hello"],selectedIndex:0,openingIds:["first"]});', w)
+  assert.equal(w.getTavernHelperVersion, getVersion)
+  assert.equal(w.TavernHelper.getTavernHelperVersion(), '4.8.19')
+})
+
+
+for (const frozen of [false, true]) test('nested script errors retain the failing owner through an outer host event: ' + frozen, async () => {
+  const run = helperHostHarness(), w = run.window
+  const original = new Error('chat-variable-host-adapter-not-configured')
+  if (frozen) Object.freeze(original)
+  w.__dshTavernHelperSetCurrentScript('b')
+  w.eventOn('inner', async () => { await tick(); throw original })
+  w.__dshTavernHelperSetCurrentScript('a')
+  w.eventOn('outer', () => w.eventEmit('inner'))
+  run.receive({ type: 'dsh-tavern-helper-event', name: 'outer', eventId: 'nested', args: [] })
+  await tick(); await tick()
+  const receipt = run.sent.find(x => x.type === 'dsh-tavern-helper-event-complete' && x.eventId === 'nested')
+  assert.equal(receipt.scriptId, 'b')
+  assert.equal(receipt.error, original.message)
 })

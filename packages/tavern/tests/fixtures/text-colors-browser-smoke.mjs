@@ -18,7 +18,7 @@ const server=createServer((request,response)=>{
  <style>body{background:#f5f3ee;color:#252830;font:17px/1.8 sans-serif;max-width:1100px;margin:30px auto}h1{font-size:24px}main{display:grid;grid-template-columns:1fr 1fr;gap:24px}article{padding:20px;background:white;border-radius:12px}iframe{width:100%;height:390px;border:0}button{padding:4px 12px}code{font-size:13px}.own-color{color:#458270}pre{font-size:12px}#result{margin-top:20px}</style>
  <h1>正文分色</h1><p>普通文字保持原色 · 引号文字为金色 · 斜体为紫色</p>
  <p><label>对白颜色 <input id=quote type=color value="#edb75f"></label>　<label>斜体颜色 <input id=em type=color value="#bba4e3"></label>　<button id=reset>恢复默认配色</button></p><main><article><h2>普通正文 · 浅色</h2><div id="prose">${sample}</div></article><article style="background:#20212c;color:#d4d4d8"><h2>人物卡 HTML · 深色</h2><iframe id="frame" sandbox="allow-scripts"></iframe></article></main><pre id="result">RUNNING</pre>
- <script>
+ <script type="module">
  const create=${client.installTavernTextColors.toString()}, find=${client.findTavernQuoteRanges.toString()};
  const prose=document.querySelector('#prose'), original=prose.innerHTML, controls=create(prose,{enabled:true},find);
  const textRanges=()=>Array.from(CSS.highlights.values()).flatMap(h=>Array.from(h,r=>r.toString()));
@@ -27,6 +27,7 @@ const server=createServer((request,response)=>{
  let overrides={};
  function send(enabled){frame.contentWindow.postMessage({type:'dsh-tavern-text-colors',token:'color-smoke',enabled,textColorOverrides:overrides},'*');frame.contentWindow.postMessage({type:'inspect-colors'},'*');}
  try {
+  await new Promise(resolve=>setTimeout(resolve,80));
   const ranges=textRanges();
   check(ranges.some(x=>x.includes('很高兴')),'quote across inline markup');
   check(ranges.some(x=>x.includes('昨天的约定')),'emphasis');

@@ -109,7 +109,7 @@ test('失败清理、重试成功、再次失败和再次重生成始终替换�
     const plan = surface.planRegenerationSurface({ events, nodes, oldAssistantSeq: target.oldSeq, eventStart })
     assert.deepEqual(plan.shadowedSeqs, nodes)
     previous = session.append('assistant/message', assistant(0, target.oldTurn, target.oldSource, []).data, {
-      surfaceOp: { op: 'replace', startSeq: plan.start, end: plan.end },
+      surfaceOp: { op: 'replace', start: plan.start, end: plan.end },
       sourceEventSeqs: plan.shadowedSeqs
     })
     assert.deepEqual(nodes, [previous])

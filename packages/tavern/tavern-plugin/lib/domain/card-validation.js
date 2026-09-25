@@ -33,7 +33,10 @@ export function validateCardText(text) {
   let data = raw
   if (raw.spec !== undefined) {
     if (!['chara_card_v2', 'chara_card_v3'].includes(raw.spec)) issue(prefix + '/spec', '不支持的人物卡 spec')
-    prefix += '/data'; data = raw.data
+    // Legacy workspace snapshots retain the spec marker but store fields flat.
+    // Match card-preparation's read/write fallback without accepting an explicit
+    // malformed data container or changing the persisted card.
+    if (raw.data !== undefined) { prefix += '/data'; data = raw.data }
   }
   if (!object(data)) { issue(prefix, '人物卡 data 必须是对象'); return result() }
   if (typeof data.name !== 'string' || !data.name.trim()) issue(prefix + '/name', '角色名必须是非空字符串')

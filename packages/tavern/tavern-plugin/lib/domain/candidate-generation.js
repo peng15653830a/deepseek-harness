@@ -1,3 +1,4 @@
+import { scriptForState } from './script-layout.js'
 import { projectAgentContent, projectAgentMessageText } from './runtime-content-projection.js'
 import { createBackgroundTaskCoordinator } from './background-task-coordinator.js'
 import { CHARACTER_DESIGN_READ_TOOL, CHARACTER_DESIGN_SAVE_TOOL } from './character-design-document.js'
@@ -165,12 +166,12 @@ export const CANDIDATE_SUBMIT_TOOL_NAME = 'candidate_submit_choices'
 
 export const CANDIDATE_SUBMIT_TOOL = Object.freeze({
   name: CANDIDATE_SUBMIT_TOOL_NAME,
-  description: '提交本轮候选项。自由故事必须提交 4 个行动候选和 1 个场景候选；剧本模式提交 1 个行动候选且 scene 留空。',
+  description: '提交本轮候选项。自由故事必须提交 4 个行动候选和 1 个场景候选；剧本模式只提交 1 项变化，填入 actions 或 scene，另一项留空。',
   parameters: Object.freeze({
     type: 'object',
     additionalProperties: false,
     properties: {
-      actions: { type: 'array', minItems: 1, maxItems: 4, items: { type: 'string', minLength: 1 } },
+      actions: { type: 'array', minItems: 0, maxItems: 4, items: { type: 'string', minLength: 1 } },
       scene: { type: 'string' }
     },
     required: ['actions', 'scene']
@@ -331,11 +332,12 @@ export function createCandidateGenerator(options) {
     let script = null
     let scriptWindow = null
     if (scriptMode) {
-      script = await store.readScript(cardPath)
+      script = scriptForState(await store.readScript(cardPath), chat.scriptState)
       if (script === undefined || !Array.isArray(script.chunks) || script.chunks.length === 0) throw new Error('剧本文件不存在，请重新为人物卡导入剧本')
       scriptWindow = scripts.inspect({ script, state: chat.scriptState, request: { kind: 'choice' } })
     }
-    const designEnabled = (await options.backgroundTasks?.(chat))?.characterDesign !== false
+    const backgroundTasks = await options.backgroundTasks?.(chat)
+    const designEnabled = backgroundTasks?.characterDesign !== false
     const task = prompt(scriptMode ? 'candidate-script' : 'candidate-story')
     const constantWorldBookContext = typeof options.stableWorldBookContext === 'function'
       ? await options.stableWorldBookContext(chat, card) : ''
@@ -344,6 +346,12 @@ export function createCandidateGenerator(options) {
     chat = taskRun.chat
     const duplicate = preparedValue()
     if (duplicate !== null) return duplicate
+    const currentScriptWindow = scriptMode ? scripts.inspect({ script, state: chat.scriptState, request: { kind: 'choice' } }) : null
+    if (scriptMode && (currentScriptWindow.cursor !== scriptWindow.cursor || currentScriptWindow.sourceOffset !== scriptWindow.sourceOffset || currentScriptWindow.chunkSize !== scriptWindow.chunkSize)) {
+      const error = new Error('剧本游标已变化，请重新生成候选项')
+      await taskRun.fail(error)
+      throw error
+    }
     const participantRequest = taskRun.participantRequest
     const persistentSessionId = str(participantRequest.sessionId)
     const guidance = str(input.guidance).trim().slice(0, 600)
@@ -393,14 +401,16 @@ export function createCandidateGenerator(options) {
       onPersistentSessionReady: id => taskRun.bindSession(id),
       sessionId: input.sessionId,
       task: 'candidate',
+      backgroundTasks,
       selection,
       temperature: 0.8,
       system: [
         context.taskText,
-        designEnabled ? '若确实需要建立、补全或修订长期人物设计，在当前后台 Agent 内调用 skill 加载 tavern-character-design，并按 Skill 使用人物档案工具；无需也不得创建另一个 Agent。完成后继续提交候选项。' : '人物设计已关闭，本任务只生成候选项，不生成档案或调用人物设计 Skill。'
+        designEnabled ? '若确实需要建立、补全或修订长期人物设计，在当前后台 Agent 内调用 skill 加载 character-design，并按 Skill 使用人物档案工具；无需也不得创建另一个 Agent。完成后继续提交候选项。' : '人物设计已关闭，本任务只生成候选项，不生成档案或调用人物设计 Skill。'
       ].join('\n\n'),
       backgroundContext: context.stableText,
       turnContext: context.dynamicText,
+      candidateScriptWindow: context.candidateScriptWindow,
       systemPromptText: context.systemPromptText,
       postHistoryText: context.postHistoryText,
       messages,

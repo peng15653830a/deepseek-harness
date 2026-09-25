@@ -10,7 +10,7 @@ import { parseChatHistory } from '../tavern-plugin/lib/domain/chat-history-impor
 import { buildImportedConversation, appendImportedEvents } from '../tavern-plugin/lib/domain/chat-history-session.js'
 import { createStoryTimeline } from '../tavern-plugin/lib/domain/story-timeline.js'
 import { locateRollbackSurface } from '../tavern-plugin/lib/domain/rollback-surface.js'
-import { sessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
+import { sessionEvents, appendSessionEvent } from '../tavern-plugin/lib/domain/session-events.js'
 const timeline = createStoryTimeline()
 function plan() {
   const text = [{ chat_metadata: {} }, { is_user: false, mes: 'opening', variables: [{stat_data:{hp:10}}] },
@@ -68,7 +68,7 @@ test('consecutive roles form native rounds and retain every paragraph and the fi
  assert.deepEqual(p.chat.messages.at(-1).importSource.lines,[6,7])
  const surface=locateRollbackSurface({events:sessionEvents(session),nodes:session.surface.nodes})
  assert.equal(surface.turn,2)
- session.append('assistant/message',{turn:2,step:1,message:{id:'rollback',role:'assistant',content:[],source:surface.source}},
+ appendSessionEvent(session, 'assistant/message',{turn:2,step:1,message:{id:'rollback',role:'assistant',content:[],source:surface.source}},
   {surfaceOp:{op:'replace',start:surface.userSeq,end:surface.endSeq},sourceEventSeqs:surface.shadowedSeqs})
  assert.deepEqual(storyMessages(session).flatMap(m=>m.content.map(b=>b.text)),['opening\n\nopening continued'])
 })

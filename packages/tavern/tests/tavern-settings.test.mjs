@@ -91,7 +91,7 @@ test('实验分支始终公开兼容模式，旧关闭信任值不影响运行',
 })
 
 test('设置界面提供分色与现有设置，不恢复旧兼容样式选项', () => {
-  const context = { TavernTextColorSettings: function TavernTextColorSettings() {}, ContextCompactionSettings: function ContextCompactionSettings() {}, SceneImageSettings: function SceneImageSettings() {}, React: {
+  const context = { CandidatePreferencesSettings: function CandidatePreferencesSettings() {}, PromptTemplateSettingsEntry: function PromptTemplateSettingsEntry() {}, TavernConversationWritingSkills: function TavernConversationWritingSkills() {}, TavernDefaultModelSetting: function TavernDefaultModelSetting() {}, TavernTextColorSettings: function TavernTextColorSettings() {}, ContextCompactionSettings: function ContextCompactionSettings() {}, SceneImageSettings: function SceneImageSettings() {}, React: {
     useState: initial => [initial, () => {}],
     useEffect() {},
     createElement: (type, props, ...children) => ({ type, props, children })
@@ -109,55 +109,16 @@ test('设置界面提供分色与现有设置，不恢复旧兼容样式选项',
   visit(root)
   assert.ok(nodes.some(node => node.type === context.TavernTextColorSettings))
   const inputs = nodes.filter(node => node.type === 'input')
-  assert.deepEqual(inputs.map(input => input.props['aria-label']), ['开启联网搜索'])
+  assert.deepEqual(inputs.map(input => input.props['aria-label']), [])
   const select = nodes.find(node => node.type === 'select' && node.props['aria-label'] === '后台模型')
-  assert.ok(select)
-  assert.match(JSON.stringify(select), /跟随前台（随切换生效）/)
+  assert.equal(select, undefined)
   assert.equal(nodes.some(node => node.type === 'textarea' || node.type === 'details'), false)
   assert.doesNotMatch(JSON.stringify(root), /兼容模式|受信任人物卡模式|SillyTavern 样式环境|Custom CSS/)
 })
 
-test('联网搜索开关保存为以后新游戏的默认值', async t => {
+test('全局接口拒绝修改本局联网搜索开关', async t => {
   const harness = await settingsHarness(t)
-  let state = { webSearchEnabled: false }
-  const events = []
-  const context = {
-    setState: updater => { state = updater(state) },
-    rpc: async (_method, args) => ({ settings: await harness.update(args.patch) }),
-    window: { dispatchEvent: event => events.push(event.type) },
-    CustomEvent: class { constructor(type) { this.type = type } }
-  }
-  const start = clientSource.indexOf('async function setWebSearchEnabled(enabled)')
-  assert.ok(start >= 0)
-  vm.runInNewContext(clientSource.slice(start, clientSource.indexOf('\n\t\t\treturn React.createElement', start)) +
-    '; this.toggle = setWebSearchEnabled;', context)
-  await context.toggle(true)
-  assert.equal(state.webSearchEnabled, true)
-  assert.equal((await harness.read()).webSearchEnabled, true)
-  assert.deepEqual(events, ['dsh-tavern-settings-changed', 'dsh-tavern-data-changed'])
-})
-
-test('后台模型选择保存为以后新游戏的默认值', async t => {
-  const harness = await settingsHarness(t)
-  let state = { backgroundModel: null }
-  const events = []
-  const context = {
-    setState: updater => { state = updater(state) },
-    rpc: async (_method, args) => ({ settings: await harness.update(args.patch) }),
-    window: { dispatchEvent: event => events.push(event.type) },
-    CustomEvent: class { constructor(type) { this.type = type } }
-  }
-  const start = clientSource.indexOf('async function setBackgroundModel(value)')
-  assert.ok(start >= 0)
-  vm.runInNewContext(clientSource.slice(start, clientSource.indexOf('\n\t\t\treturn React.createElement', start)) +
-    '; this.choose = setBackgroundModel;', context)
-  await context.choose(JSON.stringify({ provider: 'worker', model: 'stable' }))
-  assert.deepEqual(state.backgroundModel, { provider: 'worker', model: 'stable' })
-  assert.deepEqual((await harness.read()).backgroundModel, { provider: 'worker', model: 'stable' })
-  await context.choose('')
-  assert.equal(state.backgroundModel, null)
-  assert.equal((await harness.read()).backgroundModel, null)
-  assert.deepEqual(events, ['dsh-tavern-settings-changed', 'dsh-tavern-data-changed', 'dsh-tavern-settings-changed', 'dsh-tavern-data-changed'])
+  await assert.rejects(harness.update({ webSearchEnabled: true }), /本局设置/)
 })
 
 test('后台对话框以只读标签显示实际模型，不替换前台模型选择器', () => {
@@ -201,9 +162,14 @@ test('旧 play-mode 覆盖保留在数据中，但不再出现在可用提示词
 test('系统正文提示词默认使用内置内容，并可保存自定义覆盖', function () {
   const defaults = { story: '内置正文提示词' }
   assert.deepEqual(presentTavernSettings({}, defaults), {
+    candidateDismissMode: 'after-fill',
     contextCompaction: { mode: 'manual', rounds: 20, percent: 80, revision: 0 },
     compatibilityMode: true,
     webSearchEnabled: false,
+    systemAppendEnabled: false,
+    defaultDisabledWritingSkills: [],
+    defaultForegroundModel: null,
+    defaultBackgroundModel: null,
     backgroundModel: null,
     backgroundTasks: { posture: true, characterDesign: false, variables: true, ledger: false },
     trustedCardMode: true,
@@ -216,9 +182,14 @@ test('系统正文提示词默认使用内置内容，并可保存自定义覆�
   assert.equal(saved.unknown, 1)
   assert.equal(resolveSystemPrompt(saved, 'story', function () { return '默认' }), '用户正文提示词')
   assert.deepEqual(presentTavernSettings(saved, defaults), {
+    candidateDismissMode: 'after-fill',
     contextCompaction: { mode: 'manual', rounds: 20, percent: 80, revision: 0 },
     compatibilityMode: true,
     webSearchEnabled: false,
+    systemAppendEnabled: false,
+    defaultDisabledWritingSkills: [],
+    defaultForegroundModel: null,
+    defaultBackgroundModel: null,
     backgroundModel: null,
     backgroundTasks: { posture: true, characterDesign: false, variables: true, ledger: false },
     trustedCardMode: true,
@@ -230,12 +201,14 @@ test('系统正文提示词默认使用内置内容，并可保存自定义覆�
 
 test('恢复默认只删除正文覆盖并保留其他设置', function () {
   const saved = applyTavernSettingsPatch({
+    candidateDismissMode: 'after-fill',
     contextCompaction: { mode: 'manual', rounds: 20, percent: 80, revision: 0 },
     compatibilityMode: true,
     promptOverrides: { story: '用户正文提示词', future: '保留' }
   }, { storyPrompt: null })
 
   assert.deepEqual(saved, {
+    candidateDismissMode: 'after-fill',
     contextCompaction: { mode: 'manual', rounds: 20, percent: 80, revision: 0 },
     compatibilityMode: true,
     promptOverrides: { future: '保留' }
@@ -273,22 +246,81 @@ test('单项系统提示词保存和恢复不会影响其他项', function () {
 })
 
 
-test('后台任务设置默认三项开启，独立修改并持久化，变量默认开启且允许关闭', async t => {
+test('全局 API 拒绝修改后台配置，防止旧客户端改变所有对话', async t => {
   const run = await settingsHarness(t)
-  assert.deepEqual((await run.read()).backgroundTasks, { posture: true, characterDesign: false, variables: true, ledger: false })
-  await run.update({ backgroundTasks: { posture: false, variables: false, ledger: false } })
-  await run.update({ backgroundTasks: { characterDesign: true } })
-  assert.deepEqual((await run.read()).backgroundTasks, { posture: false, characterDesign: true, variables: false, ledger: false })
-  assert.deepEqual((await run.saved()).backgroundTasks, { posture: false, characterDesign: true, variables: false, ledger: false })
+  await assert.rejects(run.update({ backgroundTasks: { variables: false } }), /本局设置/)
+  await assert.rejects(run.update({ backgroundModel: null }), /本局设置/)
+})
+
+test('全局设置不再显示后台模型和结算开关', () => {
+  const start = clientSource.indexOf('function TavernSettingsSection()')
+  const section = clientSource.slice(start, clientSource.indexOf('function SystemPromptSidebarTab()', start))
+  assert.doesNotMatch(section, /setBackgroundModel|setBackgroundTask|后台推理强度|变量结算/)
+})
+
+test('已保存的全部系统提示词在重启和内置默认更新后保留，仅显式恢复默认清除', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'tavern-prompts-upgrade-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const file = 'tavern-settings.json'
+  const oldStore = createProfileDataStore({ dataRoot: root })
+  for (const name of SYSTEM_PROMPT_NAMES) {
+    await oldStore.updateJson(file, current => applyTavernSettingsPatch(current, {
+      systemPrompt: { name, text: '用户内容：' + name }
+    }))
+  }
+  const upgradedStore = createProfileDataStore({ dataRoot: root })
+  const defaults = Object.fromEntries(SYSTEM_PROMPT_NAMES.map(name => [name, '新版默认：' + name]))
+  const saved = await upgradedStore.readJson(file)
+  for (const item of presentTavernSettings(saved, defaults).systemPrompts) {
+    assert.equal(item.text, '用户内容：' + item.name)
+    assert.equal(item.customized, true)
+    assert.equal(resolveSystemPrompt(saved, item.name, name => defaults[name]), item.text)
+  }
+  await upgradedStore.updateJson(file, current => applyTavernSettingsPatch(current, {
+    systemPrompt: { name: 'story', text: null }
+  }))
+  const restored = await upgradedStore.readJson(file)
+  assert.equal(resolveSystemPrompt(restored, 'story', name => defaults[name]), defaults.story)
+  for (const name of SYSTEM_PROMPT_NAMES.filter(name => name !== 'story')) {
+    assert.equal(resolveSystemPrompt(restored, name, key => defaults[key]), '用户内容：' + name)
+  }
 })
 
 
-test('遗留台账开关不能重新启用已移除的后台任务', async t => {
-  const run = await settingsHarness(t)
-  await run.update({ backgroundTasks: { ledger: true } })
-  assert.deepEqual((await run.read()).backgroundTasks, { posture: true, characterDesign: false, variables: true, ledger: false })
-  await run.update({ backgroundTasks: { posture: false } })
-  assert.equal((await run.read()).backgroundTasks.ledger, false)
-  await run.update({ backgroundTasks: { ledger: false } })
-  assert.equal((await run.read()).backgroundTasks.ledger, false)
+test('新游戏前后台默认模型分别保存、清除且不触碰旧全局模型版本', () => {
+  let settings = { unknown: true, backgroundModelRevision: 7 }
+  for (const name of ['defaultForegroundModel', 'defaultBackgroundModel']) {
+    assert.equal(presentTavernSettings(settings, {})[name], null)
+    settings = applyTavernSettingsPatch(settings, { [name]: { provider: ' p ', model: ' m ', reasoningEffort: 'low' } })
+    assert.deepEqual(presentTavernSettings(settings, {})[name], { provider: 'p', model: 'm', reasoningEffort: 'low' })
+    assert.throws(() => applyTavernSettingsPatch(settings, { [name]: { provider: 'p' } }), /默认模型配置无效/)
+  }
+  const cleared = applyTavernSettingsPatch(settings, { defaultForegroundModel: null })
+  assert.equal(cleared.defaultForegroundModel, null)
+  assert.deepEqual(cleared.defaultBackgroundModel, settings.defaultBackgroundModel)
+  assert.equal(cleared.backgroundModelRevision, 7)
+  assert.equal(cleared.unknown, true)
+})
+
+
+test('全局写作 Skill 逐项保存，恢复开启不改动其他 Skill', () => {
+  let document = applyTavernSettingsPatch({}, { defaultWritingSkill: { name: 'one', enabled: false } })
+  document = applyTavernSettingsPatch(document, { defaultWritingSkill: { name: 'two', enabled: false } })
+  document = applyTavernSettingsPatch(document, { defaultWritingSkill: { name: 'one', enabled: false } })
+  assert.deepEqual(presentTavernSettings(document, {}).defaultDisabledWritingSkills, ['one', 'two'])
+  document = applyTavernSettingsPatch(document, { defaultWritingSkill: { name: 'one', enabled: true } })
+  assert.deepEqual(document.defaultDisabledWritingSkills, ['two'])
+  assert.throws(() => applyTavernSettingsPatch(document, { defaultWritingSkill: { name: 'one', enabled: 'false' } }), /无效/)
+})
+
+test('候选项默认填入后隐藏，保存后持久化且不覆盖其他设置', async t => {
+  const h = await settingsHarness(t)
+  assert.equal((await h.read()).candidateDismissMode, 'after-fill')
+  await h.update({ systemAppendEnabled: true, candidateDismissMode: 'after-send' })
+  assert.equal((await h.read()).candidateDismissMode, 'after-send')
+  await h.update({ candidateDismissMode: 'after-fill' })
+  assert.equal((await h.read()).candidateDismissMode, 'after-fill')
+  assert.equal((await h.read()).systemAppendEnabled, true)
+  await assert.rejects(h.update({ candidateDismissMode: 'invalid' }), /无效的候选项/)
+  assert.equal((await h.read()).candidateDismissMode, 'after-fill')
 })

@@ -37,7 +37,8 @@ test('启动恢复包含兼容与普通会话', async () => {
     presetLibrary: { migrateChat: async chat => { calls.push(chat.id); return false } },
     syncChatSummary: async () => {},
     foregroundHandoff: { recover: async ids => { context.foreground = ids } },
-    candidateTasks: { recover: async ids => { context.background = ids } }
+    candidateTasks: { recover: async ids => { context.background = ids } },
+    mvuSettlementReconciler: { scan() { assert.ok(context.foreground); assert.ok(context.background); context.scanned = true } }
   }
   const start = server.indexOf('async function recoverRuntimeHistory(')
   vm.runInNewContext(server.slice(start, server.indexOf('// ---------- 重新生成正文', start)) + '; this.recover = recoverRuntimeHistory;', context)
@@ -45,6 +46,7 @@ test('启动恢复包含兼容与普通会话', async () => {
   assert.deepEqual(calls, ['compat', 'native'])
   assert.deepEqual(Array.from(context.foreground), ['compat', 'native'])
   assert.deepEqual(Array.from(context.background), ['compat', 'native'])
+  assert.equal(context.scanned, true)
 })
 
 test('侧栏隐藏兼容实验入口但保留底层兼容能力', () => {

@@ -166,3 +166,10 @@ export function withGlobalRegexScripts(extensions, settings) {
     regexScripts: globalRegexScripts.concat(characterRegexScripts)
   })
 }
+
+/** SillyTavern priority: global, preset, character. Keep pinned replacements intact. */
+export function composeTavernRegexScripts(extensions, presetScripts = []) {
+  const scripts = Array.isArray(extensions?.regexScripts) ? extensions.regexScripts : []
+  const globalCount = Array.isArray(extensions?.globalRegexScripts) ? extensions.globalRegexScripts.length : 0
+  return scripts.slice(0, globalCount).concat(Array.isArray(presetScripts) ? presetScripts : [], scripts.slice(globalCount))
+}

@@ -89,17 +89,16 @@ test('原样宿主调用：更新世界书、保存 swipe、重新加载，实�
   await assert.rejects(host.waitGlobalInitialized('Mvu'), /尚未初始化/, 'must not claim an unloaded MVU is ready')
 })
 
-import { TavernPromptTemplateRuntime } from '../tavern-plugin/lib/domain/tavern-prompt-template-runtime.js'
-test('准备页加载真实模板引擎，运行时变量和插件设置均隔离保存', async () => {
+test('准备页运行时变量和插件设置均隔离保存', async () => {
   const { record } = fixture()
-  const service = createOpeningPreparation({ readCard: async () => card, worldBooks: { bound: async () => record }, templateRuntime: () => TavernPromptTemplateRuntime.create() })
+  const service = createOpeningPreparation({ readCard: async () => card, worldBooks: { bound: async () => record } })
   const draft = await service.create('card', { runtime: true })
   assert.equal(draft.runtime.context.extensionSettings.EjsTemplate.enabled, true)
   assert.equal(draft.runtime.scripts[0].system, 'official-mvu')
   assert.match(draft.runtime.scripts[0].assetUrl, /vendor\/magvarupdate\/bundle.js$/)
   const result = await service.callRuntime(draft.id, 'updateTavernHelperVariables', { option: { type: 'message', message_id: 0 }, variables: { stat_data: { hp: 10 }, schema: {} } })
   assert.equal(result.context.messages[0].variables.stat_data.hp, 10)
-  assert.equal(service.resolve(draft.id, "card", "alternate:0").messageVariables.stat_data.hp, 10)
+  assert.equal(service.resolve(draft.id, "card", "primary").messageVariables.stat_data.hp, 10)
   assert.equal(service.resolve(draft.id, "card", "alternate:0").openingVariables.primary.stat_data.hp, 10)
   const settings = { ...draft.runtime.context.extensionSettings, mvu: { enabled: true } }
   const saved = await service.callRuntime(draft.id, 'saveTavernExtensionSettings', { settings, expectedSettings: draft.runtime.context.extensionSettings })
@@ -169,6 +168,7 @@ test('empty greetings are excluded from script swipe indices and variable mappin
   assert.deepEqual(draft.openings.map(item => item.id), ['alternate:0', 'alternate:2'])
   await service.callRuntime(draft.id, 'updateTavernHelperMessages', { messages: [{ message_id: 0, swipes_data: [{ slot: 0 }, { slot: 1 }] }] })
   assert.deepEqual(service.resolve(draft.id, 'card', 'alternate:2').openingVariables['alternate:2'], { slot: 1 })
+  assert.deepEqual(service.resolve(draft.id, 'card', 'alternate:2').messageVariables, { slot: 1 })
 })
 
 test('native swipe.to selects a preview and rejects historical message targets', async () => {
@@ -188,4 +188,82 @@ test('native swipe.to selects a preview and rejects historical message targets',
   assert.equal(selected, 1)
   await swipe.to(null, 'left')
   assert.equal(selected, 0)
+})
+
+test('开场准备复用已读取的卡片和扩展，不重复加载资源', async () => {
+  const service = createOpeningPreparation({ readCard: async () => { throw new Error('重复读取') },
+    readRuntimeExtensions: async () => { throw new Error('重复准备扩展') }, worldBooks: { bound: async () => null } })
+  const draft = await service.create('card', { card, extensions: { helperScripts: [] } })
+  assert.ok(draft.id)
+})
+
+test('所选开场使用自己的 MVU 初值，切换后默认变量写入也落在所选槽位', async () => {
+  const service = createOpeningPreparation({ readCard: async () => structuredClone(card), worldBooks: { bound: async () => null }, readRuntimeExtensions: async () => ({ helperScripts: [{ id: 'chooser', type: 'script', content: 'void 0' }] }) })
+  const draft = await service.create('card', { runtime: true })
+  const first = { stat_data: { time: '早晨', location: '学校' } }
+  const second = { stat_data: { time: '夜晚', location: '车站' } }
+  await service.callRuntime(draft.id, 'updateTavernHelperMessages', { messages: [{ message_id: 0, swipes_data: [first, second] }] })
+  assert.deepEqual(service.resolve(draft.id, 'card', 'alternate:0').messageVariables, second)
+  service.select(draft.id, 'alternate:0')
+  const updated = { stat_data: { time: '午夜', location: '车站' } }
+  await service.callRuntime(draft.id, 'updateTavernHelperVariables', { option: { type: 'message', message_id: 0 }, variables: updated })
+  const result = service.resolve(draft.id, 'card', 'alternate:0')
+  assert.deepEqual(result.messageVariables, updated)
+  assert.deepEqual(result.openingVariables.primary, first)
+})
+
+test('完整模板初始化结果进入私有开场草稿，随后脚本能读取变量', async () => {
+  const { service } = fixture()
+  const draft = await service.create('card', { runtime: true })
+  const snapshot = service.templateState(draft.id)
+  assert.equal(snapshot.state.sessionId, 'opening:' + draft.id)
+  assert.equal(snapshot.environment.characters[0].data.extensions.world, card.name)
+  service.applyTemplateInitial(draft.id, { initial: { hp: 10 }, diagnostics: [] })
+  assert.equal(service.resolve(draft.id, 'card', 'primary').variables.hp, 10)
+  assert.equal(service.get(draft.id).runtime.context.chatVariables.hp, 10)
+  assert.deepEqual(service.resolve((await service.create('card')).id, 'card', 'primary').variables, {})
+})
+
+test('保留的开局草稿跨过原有效期仍可用，放弃立即释放，失联草稿仍过期', async () => {
+  let now = 0
+  const service = createOpeningPreparation({ now: () => now, readCard: async () => card, worldBooks: { bound: async () => null } })
+  const retained = await service.create('card'), abandoned = await service.create('card')
+  service.select(retained.id, 'alternate:0')
+  now = 90 * 60 * 1000
+  assert.deepEqual(service.retain(retained.id), { retained: true })
+  now = 150 * 60 * 1000
+  assert.equal(service.get(retained.id).openingId, 'alternate:0')
+  assert.throws(() => service.retain(abandoned.id), /过期/)
+  assert.deepEqual(service.release(retained.id), { released: true })
+  assert.throws(() => service.get(retained.id), /过期/)
+  assert.deepEqual(service.release(retained.id), { released: false })
+})
+
+test('开局记录资源版本，不把准备页的本局修改误报为库更新', async () => {
+  const { createPlayCardSnapshots, cardContentDigest } = await import('../tavern-plugin/lib/domain/play-card-snapshots.js')
+  const { service, record } = fixture()
+  const draft = await service.create('card')
+  const entries = structuredClone(draft.worldbook.entries); entries[0].enabled = true
+  await service.replaceWorldbook(draft.id, entries, draft.worldbook.entries)
+  const openingWorldbookSnapshot = service.resolve(draft.id, 'card', 'primary').worldbookSnapshot
+  const snapshots = createPlayCardSnapshots({ worldBooks: { bound: async () => ({ ...record, document: record.view.raw }) } })
+  const chat = { cardPath: 'card', cardContentDigest: cardContentDigest(card), openingWorldbookSnapshot }
+  assert.equal((await snapshots.updateStatus(chat, card)).available, false)
+})
+
+test('旧存档无源版本时，本局脚本写入不误报库更新', async () => {
+  const { createPlayCardSnapshots, cardContentDigest } = await import('../tavern-plugin/lib/domain/play-card-snapshots.js')
+  const h = await createHelperWorldbookHost(false)
+  try {
+    const card = await h.readCard()
+    h.chat.cardContentDigest = cardContentDigest(card)
+    const record = await h.record()
+    h.chat.openingWorldbookSnapshot = { version: 1, source: record.source, document: structuredClone(record.document) }
+    const old = (await h.adapter.getWorldbook('audit', '审计书')).worldbook.entries
+    const changed = structuredClone(old); changed[0].content = '本局变量变化后的内容'
+    await h.adapter.replaceWorldbook('audit', '审计书', changed, old)
+    const api = createPlayCardSnapshots({ worldBooks: h.library })
+    assert.equal((await api.updateStatus(h.chat, card)).available, false)
+    assert.equal((await h.adapter.getWorldbook('audit', '审计书')).worldbook.entries[0].content, '本局变量变化后的内容')
+  } finally { await h.cleanup() }
 })

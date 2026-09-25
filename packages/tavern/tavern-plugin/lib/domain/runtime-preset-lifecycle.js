@@ -111,6 +111,13 @@ export function projectRuntimePresetRequest(request, snapshot, options = {}) {
   const systemText = str(request.system)
   const moveSystem = front.length > 0 && systemText !== ''
   if (!moveSystem && front.length === 0 && back.length === 0 && ordinary.length === source.length) return request
+  // V3 carries the assembled system prompt as a native message, sometimes
+  // after the opening seed. Keep it at the system boundary when composing
+  // presets; ordinary in-story system notes retain their existing treatment.
+  const isNativeSystem = message => message.role === 'system' && message.source?.kind === 'plugin' &&
+    message.source.plugin === '@deepseek-ai/dsh-system-prompt'
+  const nativeSystems = ordinary.filter(isNativeSystem)
+  const history = ordinary.filter(message => !isNativeSystem(message))
   const systemMessages = moveSystem ? [{
     id: 'dsh-tavern-runtime-system-' + randomUUID(),
     role: 'system',
@@ -122,6 +129,6 @@ export function projectRuntimePresetRequest(request, snapshot, options = {}) {
   }] : []
   return Object.assign({}, request, {
     ...(moveSystem ? { system: '' } : {}),
-    messages: normalizeRuntimeRequestRoles(front.concat(systemMessages, ordinary, back))
+    messages: normalizeRuntimeRequestRoles(front.concat(systemMessages, nativeSystems, history, back))
   })
 }

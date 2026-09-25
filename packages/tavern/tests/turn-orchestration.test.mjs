@@ -70,6 +70,11 @@ function harness(mode, options = {}) {
       value._storageRevision = revision
       history.set(revision, clone(chat))
     },
+    async updateChat(_id, mutation, metadata) {
+      const next = await mutation(clone(chat))
+      if (next !== undefined) await store.writeChat(next, metadata)
+      return clone(chat)
+    },
     async updateCard(_cardId, fields, revision, rawOperations) {
       const change = cards.update({ kind: 'card', card: cardWorkspace, patch: fields, revision, rawOperations })
       cardWorkspace = clone(change.card)
@@ -128,8 +133,11 @@ function harness(mode, options = {}) {
       return result.text
     } : undefined,
     resolvePresetRegexScripts: options.resolvePresetRegexScripts,
+    projectUserTemplate: options.projectUserTemplate,
     projectReply: projectReplyPresentation,
     projectWorldBookTemplates: options.projectWorldBookTemplates,
+    projectForegroundWorldbook: options.projectForegroundWorldbook,
+    recordWorldbookRecall: options.recordWorldbookRecall,
     projectScriptPromptWorldbook: options.projectScriptPromptWorldbook,
     shellToolName: options.shellToolName,
     now: () => 2000
@@ -479,6 +487,17 @@ test('普通游玩的预设中段作为写作规则进入 ForegroundFrame', asyn
   assert.equal(prepared.frame.source.preset.digest, 'preset-digest')
 })
 
+test('预设中段渲染后进入真实 Frame，并保留存档中的原始宏', async () => {
+  const raw = {
+    front: { entries: [{ role: 'system', content: '{{setvar::style::温和}}' }] },
+    middle: { entries: [{ role: 'system', content: '采用{{getvar::style}}笔调。' }] }
+  }
+  const run = harness('story', { runtimePresetSnapshot: structuredClone(raw) })
+  const prepared = await run.orchestrator.prepare({ sessionId: 'session-1', turn: 2, userText: '继续' })
+  assert.match(prepared.frame.context.writingRules, /采用温和笔调。/)
+  assert.deepEqual(run.chat().runtimePresetSnapshot, raw)
+})
+
 test('游玩回复先执行人物卡宏，再分别保存原文、Session 和展示投影', async () => {
   const run = harness('story', { macros: true })
   await run.orchestrator.prepare({ sessionId: 'session-1', turn: 2, userText: '查看状态' })
@@ -600,6 +619,7 @@ test('兼容旧暂存记录：在最终回复完成后写入', async () => {
     'edit',
     'read_image',
     'skill',
+    'tavern_read_skill_reference',
     'tavern_save_skill',
     'cordis_inspect_list',
     'cordis_inspect_query',
@@ -609,8 +629,7 @@ test('兼容旧暂存记录：在最终回复完成后写入', async () => {
     'cordis_stop',
     'cordis_undefine',
     'tavern_user_profile_read',
-    'tavern_user_profile_save_draft',
-    'tavern_user_profile_confirm',
+    'tavern_user_profile_save',
     'tavern_read_card',
     'tavern_read_card_raw',
     'tavern_read_play_chat',
@@ -618,9 +637,11 @@ test('兼容旧暂存记录：在最终回复完成后写入', async () => {
     'tavern_update_worldbook',
     'tavern_read_preset',
     'tavern_update_preset',
+    'tavern_copy_card', 'tavern_convert_to_mvu', 'tavern_validate_mvu_conversion',
     'tavern_update_card',
     'tavern_restore_card',
     'tavern_validate_card',
+    'tavern_test_response',
   ])
 })
 
@@ -647,6 +668,7 @@ test('Windows 卡片模式暴露 PowerShell 而不是 Bash', async () => {
     'edit',
     'read_image',
     'skill',
+    'tavern_read_skill_reference',
     'tavern_save_skill',
     'cordis_inspect_list',
     'cordis_inspect_query',
@@ -656,8 +678,7 @@ test('Windows 卡片模式暴露 PowerShell 而不是 Bash', async () => {
     'cordis_stop',
     'cordis_undefine',
     'tavern_user_profile_read',
-    'tavern_user_profile_save_draft',
-    'tavern_user_profile_confirm',
+    'tavern_user_profile_save',
     'tavern_read_card',
     'tavern_read_card_raw',
     'tavern_read_play_chat',
@@ -665,9 +686,11 @@ test('Windows 卡片模式暴露 PowerShell 而不是 Bash', async () => {
     'tavern_update_worldbook',
     'tavern_read_preset',
     'tavern_update_preset',
+    'tavern_copy_card', 'tavern_convert_to_mvu', 'tavern_validate_mvu_conversion',
     'tavern_update_card',
     'tavern_restore_card',
     'tavern_validate_card',
+    'tavern_test_response',
   ])
 })
 
@@ -688,21 +711,21 @@ test('空白卡片工作台确认完整设定后直接创建并绑定正式人�
   const duplicate = await run.orchestrator.finalize({ sessionId: 'session-1', turn: 6, userText: '确认角色和玩家', assistantText: '重复回调' })
   assert.equal(duplicate.duplicate, true)
   assert.equal(run.createdCards.length, 1)
-  assert.deepEqual(await run.orchestrator.visibleTools('session-1'), ['web_search', 'bash', 'str_replace_editor', 'read', 'write', 'edit', 'read_image', 'skill', 'tavern_save_skill', 'cordis_inspect_list', 'cordis_inspect_query', 'cordis_inspect_self', 'cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'tavern_user_profile_read', 'tavern_user_profile_save_draft', 'tavern_user_profile_confirm', 'tavern_read_card', 'tavern_read_card_raw', 'tavern_read_play_chat', 'tavern_read_worldbook', 'tavern_update_worldbook', 'tavern_read_preset', 'tavern_update_preset', 'tavern_update_card', 'tavern_restore_card', 'tavern_validate_card'])
+  assert.deepEqual(await run.orchestrator.visibleTools('session-1'), ['web_search', 'bash', 'str_replace_editor', 'read', 'write', 'edit', 'read_image', 'skill', 'tavern_read_skill_reference', 'tavern_save_skill', 'cordis_inspect_list', 'cordis_inspect_query', 'cordis_inspect_self', 'cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'tavern_user_profile_read', 'tavern_user_profile_save', 'tavern_read_card', 'tavern_read_card_raw', 'tavern_read_play_chat', 'tavern_read_worldbook', 'tavern_update_worldbook', 'tavern_read_preset', 'tavern_update_preset', 'tavern_copy_card', 'tavern_convert_to_mvu', 'tavern_validate_mvu_conversion', 'tavern_update_card', 'tavern_restore_card', 'tavern_validate_card', 'tavern_test_response'])
 })
 
 test('前台自由故事和剧本模式稳定暴露历史正文检索工具', async () => {
   const story = harness('story')
   const script = harness('script')
 
-  assert.deepEqual(await story.orchestrator.visibleTools('session-1'), ['tavern_recall_history'])
-  assert.deepEqual(await script.orchestrator.visibleTools('session-1'), ['tavern_read_script', 'tavern_recall_history'])
+  assert.deepEqual(await story.orchestrator.visibleTools('session-1'), ['skill', 'tavern_read_skill_reference', 'tavern_recall_history', 'worldbook_search'])
+  assert.deepEqual(await script.orchestrator.visibleTools('session-1'), ['skill', 'tavern_read_skill_reference', 'tavern_read_script', 'tavern_recall_history', 'worldbook_search'])
 })
 
 test('游戏前台按快照启用联网搜索，卡片工作台始终启用', async () => {
-  assert.deepEqual(await harness('story').orchestrator.visibleTools('session-1'), ['tavern_recall_history'])
-  assert.deepEqual(await harness('story', { webSearchEnabled: true }).orchestrator.visibleTools('session-1'), ['tavern_recall_history', 'web_search'])
-  assert.deepEqual(await harness('script', { webSearchEnabled: true }).orchestrator.visibleTools('session-1'), ['tavern_read_script', 'tavern_recall_history', 'web_search'])
+  assert.deepEqual(await harness('story').orchestrator.visibleTools('session-1'), ['skill', 'tavern_read_skill_reference', 'tavern_recall_history', 'worldbook_search'])
+  assert.deepEqual(await harness('story', { webSearchEnabled: true }).orchestrator.visibleTools('session-1'), ['skill', 'tavern_read_skill_reference', 'tavern_recall_history', 'worldbook_search', 'web_search'])
+  assert.deepEqual(await harness('script', { webSearchEnabled: true }).orchestrator.visibleTools('session-1'), ['skill', 'tavern_read_skill_reference', 'tavern_read_script', 'tavern_recall_history', 'worldbook_search', 'web_search'])
   for (const webSearchEnabled of [false, true]) {
     assert.equal((await harness('card', { webSearchEnabled }).orchestrator.visibleTools('session-1')).includes('web_search'), true)
   }
@@ -811,4 +834,70 @@ test('repair workbench reaches tools and completes even when its card cannot par
   assert.equal(done.saved, true)
   const play = harness('story', { brokenCard: true })
   await assert.rejects(play.orchestrator.prepare({ sessionId: 'session-1', turn: 1, userText: '继续' }), /invalid JSON/)
+})
+
+
+test('正式 Frame 使用当前输入的统一世界书投影，重试复用 Frame，不重抽组或重复记冷却', async () => {
+  let calls = 0
+  const planner = createContextPlanner({ prompt: () => '' })
+  const run = harness('story', { planner, preparedWorldBookContext: '过期的预扫描',
+    projectForegroundWorldbook: async ({ userText }) => {
+      calls++
+      assert.equal(userText, '找 Alice')
+      return { context: '<角色库>\nAlice\n</角色库>', refs: ['entry:1'], reads: { 'entry:1': { turn: 0, fingerprint: 'test' } },
+        activation: { schemaVersion: 2, refs: ['entry:1'], mode: 'keywords' }, diagnostics: [], error: null }
+    }
+  })
+  const first = await run.orchestrator.prepare({ sessionId: 'session-1', turn: 1, userText: '找 Alice' })
+  const retry = await run.orchestrator.prepare({ sessionId: 'session-1', turn: 1, userText: '找 Alice' })
+  assert.equal(calls, 1)
+  assert.deepEqual(first.frame, retry.frame)
+  assert.match(first.frame.context.activeWorldbook, /<角色库>\nAlice\n<\/角色库>/)
+  assert.doesNotMatch(first.frame.context.activeWorldbook, /过期的预扫描/)
+  assert.deepEqual(first.frame.source.worldBook.refs, ['entry:1'])
+  assert.equal(run.chat().worldBookReads['entry:1'].turn, 0)
+})
+
+
+test('世界书日志收据进入不可变 Frame；日志写入失败不阻断正文', async () => {
+ for (const fail of [false,true]) {
+  const run=harness('story',{projectForegroundWorldbook:async()=>({context:'世界书正文',refs:[],activation:{refs:[]},log:{entries:[],outputs:[]}}),
+   recordWorldbookRecall:async()=>{if(fail)throw Error('磁盘不可写');return 'worldbook-recalls/chat/op.json'}})
+  const result=await run.orchestrator.prepare({sessionId:'session-1',turn:1,userText:'继续'})
+  assert.equal(result.ready,true)
+  assert.equal(Object.isFrozen(result.frame),true)
+  if(fail)assert.equal(result.frame.source.worldBook.recallLogError,'磁盘不可写')
+  else assert.equal(result.frame.source.worldBook.recallLog,'worldbook-recalls/chat/op.json')
+ }
+})
+
+test('玩家模板先于本轮召回，重试不重复执行；提交后只产生一条玩家消息', async () => {
+  for (const compatibility of [false,true]) {
+    let calls=0
+    const run=harness('story',{projectUserTemplate:async()=>{
+      calls++
+      return {message:{role:'user',text:'进入少林',variables:[{place:'少林'}],tavernPluginData:{is_ejs_processed:[true]}},scopes:{local:{place:'少林'},initial:{}}}
+    },projectForegroundWorldbook:async({chat,userText})=>{
+      assert.equal(chat.variables.place,'少林');assert.equal(userText,'进入少林')
+      return {context:'少林名册',activation:{refs:[]},refs:[],reads:{}}
+    }})
+    const input={sessionId:'session-1',turn:2,userText:'原始模板'}
+    const start=compatibility?'beginCompatibility':'prepare'
+    const first=await run.orchestrator[start](input)
+    await run.orchestrator[start](input)
+    assert.equal(calls,1)
+    assert.equal(first.userText,'进入少林')
+    assert.equal(run.chat().messages.length,0)
+    await run.orchestrator.finalize({...input,assistantText:'少林的僧人迎上前。'})
+    assert.equal(run.chat().messages.length,2)
+    assert.equal(run.chat().messages[0].text,'进入少林')
+    assert.equal(run.chat().messages[0].variables[0].place,'少林')
+    assert.equal(run.chat().promptTemplateInput,undefined)
+  }
+})
+
+for (const mode of ['story', 'script']) test(mode + ' 缺少人物卡绑定时明确拒绝开始回合', async () => {
+  const run = harness(mode, { draft: true })
+  await assert.rejects(run.orchestrator.prepare({ sessionId: 'session-1', turn: 1, userText: '继续' }), /缺少人物卡绑定/)
+  assert.equal(run.plannerCalls.length, 0)
 })

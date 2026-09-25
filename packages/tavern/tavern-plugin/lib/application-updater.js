@@ -16,7 +16,7 @@ const VERSION_URL = 'https://raw.githubusercontent.com/flizzywine/dsh-tavern/mai
 const COMMIT_URL = 'https://api.github.com/repos/flizzywine/dsh-tavern/commits/main'
 const COMPARE_URL = 'https://api.github.com/repos/flizzywine/dsh-tavern/compare'
 const execFileAsync = promisify(execFile)
-const UPDATE_CHECK_POLICY = 3
+const UPDATE_CHECK_POLICY = 4
 const CDN_METADATA_URL = 'https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@main/dsh-tavern-runtime.json'
 const RUNTIME_FILES = new Set(['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'cordis.patch.yml', 'install.ps1', 'install.sh'])
 const RUNTIME_DIRECTORIES = ['bin/', 'config/', 'presets/', 'tavern-plugin/', 'patches/']
@@ -87,6 +87,7 @@ async function readVerifiedRuntimeMetadata(sourceRoot) {
 
 export function sanitizeUpdateError(value) {
   const message = String(value || '').trim()
+  if (/PostQueuedCompletionStatus:\s*\(6\)/.test(message)) return '更新失败：Windows 安装子进程退出异常（PostQueuedCompletionStatus: 6，句柄无效）。请使用修复后的更新程序重试；原始详情见更新诊断日志。'
   const replacements = (message.match(/\uFFFD/g) || []).length
   if (replacements >= 2) return '更新失败：安装程序输出编码异常。建议重新安装一次。'
   return message || '更新失败，请重新安装一次。'
@@ -204,9 +205,16 @@ export function createApplicationUpdater(options) {
   }
   async function diagnosticFetch(url, init, timeoutMs = 5000) {
     record('request', { url, timeoutMs })
-    const response = await fetch(url, init)
-    record('response', { url, status: response.status })
-    return response
+    const startedAt = now()
+    try {
+      const response = await fetch(url, init)
+      record('response', { url, status: response.status, durationMs: now() - startedAt })
+      return response
+    } catch (error) {
+      record('request.failed', { url, durationMs: now() - startedAt, error: String(error?.message || error), code: error?.code,
+        cause: error?.cause ? { message: String(error.cause.message || error.cause), code: error.cause.code } : undefined })
+      throw error
+    }
   }
   const fetchManifest = options.fetchManifest || async function () {
     const response = await diagnosticFetch(options.versionUrl || process.env.DSH_TAVERN_VERSION_URL || VERSION_URL, {
@@ -294,44 +302,46 @@ export function createApplicationUpdater(options) {
     const { currentVersion, currentCommit, currentReleaseSequence } = identity
     if (currentVersion === 'unknown') throw new Error('无法确认当前构建，请手动重新安装')
     try {
-      const compared = await compareCdnRuntime(sourceRoot, await stage('cdn.fetch', fetchCdnMetadata))
-      record('cdn.comparison', { currentVersion, currentCommit, currentReleaseSequence, latestVersion: compared.version, latestCommit: compared.revision, latestReleaseSequence: compared.releaseSequence, matches: compared.matches })
-      let updateAvailable = false
-      if (!compared.matches && currentCommit.toLowerCase() !== String(compared.revision).toLowerCase()) {
-        if (currentReleaseSequence && compared.releaseSequence) {
-          updateAvailable = compared.releaseSequence > currentReleaseSequence
-        } else if (compared.version && compareVersions(compared.version, currentVersion) !== 0) {
-          updateAvailable = compareVersions(compared.version, currentVersion) > 0
-        } else {
-          throw new Error('jsDelivr 清单缺少可比较的发布序号，需使用 GitHub 确认提交先后')
-        }
-      }
+      const [remote, latestCommitResult] = await Promise.all([stage('github.version', fetchManifest), stage('github.commit', fetchLatestCommit)])
+      const { publishedCommit, runtimeCommit: latestCommit } = runtimeCommitIdentityOf(latestCommitResult)
+      const latestVersion = String(remote?.version || '')
+      if (currentVersion === '' || latestVersion === '') throw new Error('版本信息不完整')
+      if (!/^[0-9a-f]{40}$/i.test(latestCommit)) throw new Error('GitHub 返回的提交号无效')
+      const normalizedCurrentCommit = currentCommit.toLowerCase() === publishedCommit.toLowerCase()
+        ? latestCommit
+        : currentCommit
       return {
-        currentVersion,
-        latestVersion: compared.version || currentVersion,
-        currentCommit,
-        latestCommit: compared.revision,
-        checkSource: 'jsdelivr',
-        updateAvailable,
+        currentVersion, latestVersion, currentCommit: normalizedCurrentCommit, latestCommit, checkSource: 'github',
+        updateAvailable: compareVersions(latestVersion, currentVersion) >= 0 && await isNewerCommit(normalizedCurrentCommit, latestCommit),
+        checkWarning: undefined,
       }
-    } catch (cdnError) {
-      record('fallback.github', { reason: String(cdnError?.message || cdnError) })
+    } catch (githubError) {
+      record('fallback.cdn', { reason: sanitizeUpdateError(githubError?.message || githubError) })
       try {
-        const [remote, latestCommitResult] = await Promise.all([stage('github.version', fetchManifest), stage('github.commit', fetchLatestCommit)])
-        const { publishedCommit, runtimeCommit: latestCommit } = runtimeCommitIdentityOf(latestCommitResult)
-        const latestVersion = String(remote?.version || '')
-        if (currentVersion === '' || latestVersion === '') throw new Error('版本信息不完整')
-        if (!/^[0-9a-f]{40}$/i.test(latestCommit)) throw new Error('GitHub 返回的提交号无效')
-        const normalizedCurrentCommit = currentCommit.toLowerCase() === publishedCommit.toLowerCase()
-          ? latestCommit
-          : currentCommit
-        return {
-          currentVersion, latestVersion, currentCommit: normalizedCurrentCommit, latestCommit, checkSource: 'github',
-          updateAvailable: compareVersions(latestVersion, currentVersion) >= 0 && await isNewerCommit(normalizedCurrentCommit, latestCommit),
-          checkWarning: undefined,
+        const compared = await compareCdnRuntime(sourceRoot, await stage('cdn.fetch', fetchCdnMetadata))
+        record('cdn.comparison', { currentVersion, currentCommit, currentReleaseSequence, latestVersion: compared.version, latestCommit: compared.revision, latestReleaseSequence: compared.releaseSequence, matches: compared.matches })
+        let updateAvailable = false
+        if (!compared.matches && currentCommit.toLowerCase() !== String(compared.revision).toLowerCase()) {
+          if (currentReleaseSequence && compared.releaseSequence) {
+            updateAvailable = compared.releaseSequence > currentReleaseSequence
+          } else if (compared.version && compareVersions(compared.version, currentVersion) !== 0) {
+            updateAvailable = compareVersions(compared.version, currentVersion) > 0
+          } else {
+            throw new Error('jsDelivr 清单缺少可比较的发布序号，需使用 GitHub 确认提交先后')
+          }
         }
-      } catch (githubError) {
-        throw new Error(`jsDelivr 不可用（${sanitizeUpdateError(cdnError?.message || cdnError)}）；GitHub 备用源也不可用（${sanitizeUpdateError(githubError?.message || githubError)}）`)
+        if (!updateAvailable) throw new Error('CDN 清单未显示更高构建，无法确认是否为最新版本')
+        return {
+          currentVersion,
+          latestVersion: compared.version || currentVersion,
+          currentCommit,
+          latestCommit: compared.revision,
+          checkSource: 'jsdelivr',
+          checkWarning: 'GitHub 暂不可达；已发现 CDN 上的较新构建，但无法确认它是最新构建。',
+          updateAvailable,
+        }
+      } catch (cdnError) {
+        throw new Error(`暂时无法确认最新版本：GitHub 核实失败（${sanitizeUpdateError(githubError?.message || githubError)}）；CDN 备用检查（${sanitizeUpdateError(cdnError?.message || cdnError)}）`)
       }
     }
   }
@@ -347,9 +357,10 @@ export function createApplicationUpdater(options) {
   }
 
   async function statusWithIdentity(identity) {
-    const current = await store.readJson(STATUS_FILE)
+    const saved = await store.readJson(STATUS_FILE)
+    const current = saved === undefined ? undefined : { ...saved, host: await host() }
     if (current !== undefined) {
-      if (current.phase === 'update-available' && (current.checkPolicy !== UPDATE_CHECK_POLICY || current.checkedForCommit !== identity.currentCommit)) {
+      if (['update-available', 'up-to-date'].includes(current.phase) && (current.checkPolicy !== UPDATE_CHECK_POLICY || current.checkedForCommit !== identity.currentCommit)) {
         const invalidated = { phase: 'idle', host: await host(), ...identity }
         await writeStatus( invalidated)
         return invalidated
@@ -367,13 +378,16 @@ export function createApplicationUpdater(options) {
         await writeStatus( interrupted)
         return { ...interrupted, ...identity }
       }
-      if (current.phase === 'installed-restart-required' && current.host !== 'desktop') {
-        const completed = {
-          phase: 'completed', host: current.host, completedAt: checkedAt,
-          targetCommit: current.targetCommit, recoveredByRestart: true,
+      if (current.phase === 'installed-restart-required') {
+        // Older installers inferred success from copied source files, which
+        // does not prove dependency installation or profile setup succeeded.
+        const recovered = {
+          phase: 'failed', repairRequired: true, host: current.host, failedAt: checkedAt,
+          targetCommit: current.targetCommit,
+          error: '上次更新未确认安装完成，请重新检查并重试更新。',
         }
-        await writeStatus( completed)
-        return { ...completed, ...identity }
+        await writeStatus(recovered)
+        return { ...recovered, ...identity }
       }
       if (current.phase === 'failed') {
         const error = sanitizeUpdateError(current.error)
@@ -406,6 +420,7 @@ export function createApplicationUpdater(options) {
     } catch (error) {
       const failed = {
         phase: 'check-failed', host: installHost, checkedAt: now(),
+        ...(current.repairRequired ? { repairRequired: true } : {}),
         currentVersion: current.currentVersion, currentCommit: current.currentCommit,
         error: `无法检查更新：${sanitizeUpdateError(error?.message || error)}`,
       }
@@ -415,7 +430,8 @@ export function createApplicationUpdater(options) {
     const checked = {
       checkPolicy: UPDATE_CHECK_POLICY,
       checkedForCommit: identity.currentCommit,
-      phase: version.updateAvailable ? 'update-available' : 'up-to-date',
+      phase: version.updateAvailable || current.repairRequired ? 'update-available' : 'up-to-date',
+      ...(current.repairRequired ? { repairRequired: true } : {}),
       host: installHost, checkedAt: now(),
       currentVersion: version.currentVersion, latestVersion: version.latestVersion,
       currentCommit: version.currentCommit, latestCommit: version.latestCommit,
@@ -437,11 +453,11 @@ export function createApplicationUpdater(options) {
     try {
       version = await versions(identity)
     } catch (error) {
-      const failed = { phase: 'failed', host: installHost, failedAt: now(), error: `无法检查最新版，尚未开始下载：${sanitizeUpdateError(error?.message || error)}` }
+      const failed = { phase: 'failed', ...(current.repairRequired ? { repairRequired: true } : {}), host: installHost, failedAt: now(), error: `无法检查最新版，尚未开始下载：${sanitizeUpdateError(error?.message || error)}` }
       await writeStatus( failed)
       throw new Error(failed.error)
     }
-    if (!version.updateAvailable) {
+    if (!version.updateAvailable && !current.repairRequired) {
       const upToDate = {
         phase: 'up-to-date', host: installHost, checkedAt: now(),
         currentVersion: version.currentVersion, latestVersion: version.latestVersion,
@@ -504,7 +520,7 @@ export function createApplicationUpdater(options) {
         await writeStatus( running)
       }
     } catch (error) {
-      const failed = { phase: 'failed', host: installHost, failedAt: now(), error: String(error?.message || error) }
+      const failed = { phase: 'failed', ...(current.repairRequired ? { repairRequired: true } : {}), host: installHost, failedAt: now(), error: String(error?.message || error) }
       await writeStatus( failed)
       throw error
     }

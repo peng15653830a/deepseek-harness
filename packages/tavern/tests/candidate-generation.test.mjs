@@ -25,7 +25,7 @@ function script() {
   }
 }
 
-function harness({ mode = 'story', outputs, initialCandidates, initialCandidateAgent, initialSettleStatus, messages, initialScriptCursor = 0, initialScriptEnded = false, scriptData, cardData, macroState, waitUntilSettled, writeChatHook, modelSelection }) {
+function harness({ mode = 'story', outputs, initialCandidates, initialCandidateAgent, initialSettleStatus, messages, initialScriptCursor = 0, initialScriptEnded = false, scriptData, cardData, macroState, waitUntilSettled, writeChatHook, modelSelection, planHook }) {
   const continuity = createScriptContinuity()
   const activeScript = scriptData || script()
   let scriptState = mode === 'script' ? continuity.start(activeScript, initialScriptCursor) : null
@@ -103,6 +103,7 @@ function harness({ mode = 'story', outputs, initialCandidates, initialCandidateA
   const planner = {
     async plan(input) {
       plannerCalls.push(input)
+      await planHook?.()
       return { text: '候选项上下文', stableText: '稳定候选上下文', taskText: '候选格式规则', systemPromptText: '本轮系统提示', postHistoryText: '本轮历史后指令', dynamicText: '本轮游标、Guide 与姿势', audit: { included: [], omitted: [], warnings: [], totalChars: 7 } }
     }
   }
@@ -137,7 +138,7 @@ test('普通和剧本候选都分离固定背景、逐轮指令与动态状态',
     assert.equal(run.plannerCalls[0].constantWorldBookContext, '常驻世界设定')
     assert.equal(request.backgroundContext, '稳定候选上下文')
     assert.match(request.system, /^候选格式规则/)
-    assert.match(request.system, /skill 加载 tavern-character-design/)
+    assert.match(request.system, /skill 加载 character-design/)
     assert.equal(request.turnContext, '本轮游标、Guide 与姿势')
     assert.equal(request.systemPromptText, '本轮系统提示')
     assert.equal(request.postHistoryText, '本轮历史后指令')
@@ -367,6 +368,19 @@ test('自由故事过滤无效项后按类型顺序裁剪超额候选', async ()
   ])
   assert.equal(run.modelCalls(), 1)
   assert.match(run.warnings.join('\n'), /候选项.*裁剪/)
+})
+
+test('剧本模式允许通过工具提交单个场景候选并保存类型', async () => {
+  const text = '夜幕降临，钟楼外响起巡夜人的脚步声'
+  const run = harness({ mode: 'script', outputs: [async options => {
+    const tool = options.tools.find(item => item.name === 'candidate_submit_choices')
+    assert.equal(tool.parameters.properties.actions.minItems, 0)
+    await options.onToolCall({ name: 'candidate_submit_choices', arguments: { actions: [], scene: text } })
+    return ''
+  }] })
+  const result = await run.candidates.generate({ sessionId: 'session-1', messageId: 'script-scene' })
+  assert.deepEqual(result.choices, [{ type: 'scene', text }])
+  assert.deepEqual(run.chat().candidates.choices, result.choices)
 })
 
 test('剧本模式存在多个有效候选时只保留第一个', async () => {
@@ -686,3 +700,24 @@ test('first candidate interrupted before a result keeps its bound session for re
   await run.candidates.generate({ sessionId: 'session-1', messageId: 'first' });
   assert.equal(run.modelRequests[1].persistentSessionId, 'background-bound-before-result');
 });
+
+
+test('候选准备期间人工移动游标，旧上下文不得开始模型任务或覆盖游标', async () => {
+  let run
+  run = harness({ mode: 'script', outputs: [], planHook: () => {
+    run.mutateChat(chat => { chat.scriptState = createScriptContinuity().transition({ script: script(), state: chat.scriptState, event: { kind: 'manual-focus', cursor: 3 } }).state })
+  } })
+  await assert.rejects(run.candidates.generate({ sessionId: 'session-1', messageId: 'manual-cursor' }), /剧本游标已变化/)
+  assert.equal(run.modelRequests.length, 0)
+  assert.equal(run.chat().scriptState.cursor, 2)
+  assert.equal(run.chat().candidates, undefined)
+})
+
+test('候选准备期间修改切片字数，即使游标未变也不能继续使用旧上下文', async () => {
+  let run
+  run = harness({ mode: 'script', outputs: [], planHook: () => {
+    run.mutateChat(chat => { chat.scriptState = createScriptContinuity().transition({ script: script(), state: chat.scriptState, event: { kind: 'set-chunk-size', chunkSize: 1000 } }).state })
+  } })
+  await assert.rejects(run.candidates.generate({ sessionId: 'session-1', messageId: 'new-budget' }), /剧本游标已变化/)
+  assert.equal(run.modelRequests.length, 0)
+})

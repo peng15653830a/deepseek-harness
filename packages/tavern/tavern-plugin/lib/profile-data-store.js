@@ -24,6 +24,13 @@ export function createProfileDataStore(options) {
   return Object.freeze({
     async version(relativePath) { return files.version(resolveSafePath(dataRoot, relativePath)) },
     async readJson(relativePath) { return decodeJson(await files.read(resolveSafePath(dataRoot, relativePath))) },
+    async readText(relativePath) { return (await files.read(resolveSafePath(dataRoot, relativePath)))?.toString('utf8') },
+    async appendText(relativePath, text, options) {
+      return files.append(resolveSafePath(dataRoot, relativePath), text, {
+        ...options,
+        compact: async (current, frame) => options.compact(current?.toString('utf8'), frame.toString('utf8'))
+      })
+    },
     async writeJson(relativePath, value) { return files.write(resolveSafePath(dataRoot, relativePath), encodeJson(value)) },
     async updateJson(relativePath, updater) {
       const result = await files.update(resolveSafePath(dataRoot, relativePath), async function (current) {

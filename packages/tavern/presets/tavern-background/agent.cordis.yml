@@ -1,11 +1,6 @@
 # Tavern 后台 Agent 的最小 DSH 预设。
 # 提供压缩与 Tavern Skill 按需加载，不继承前台正文提示词、其他工具或正则。
-- id: skill-filesystem
-  name: '@deepseek-ai/dsh-skill-filesystem'
-  config:
-    includeDefaultRoots: false
-    bundledSkillDir: !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
-
+# Skill 来源由 Tavern 按 Agent 用途分配，调用仍使用原生工具。
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
 

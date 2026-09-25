@@ -69,14 +69,15 @@ test('alpha.2 prewarm and startup use the same adapter without creating a second
   })
   await prewarm.begin({ key: 'card1' })
   const prepared = await prewarm.claim('card1')
-  assert.equal(prepared, 's1')
+  assert.equal(prepared, 'w1')
+  assert.deepEqual(calls, [])
   const lifecycle = client.createConversationLifecycleModule({
     archiveCurrent: async () => {}, resolveWorkspace: async () => 'w1',
     connectWorkspace: host.connectWorkspace, ensurePreset: host.ensurePreset,
     waitForSession: async () => {}, createChat: async () => {},
     rememberPending: () => {}, finishOpen: async () => {}
   })
-  await lifecycle.start({ kind: 'play', preparedSessionId: prepared })
+  await lifecycle.start({ kind: 'play', preparedWorkspaceId: prepared })
   assert.deepEqual(calls, [['create', 'w1'], ['preset', 's1', 'tavern']])
 })
 
@@ -92,11 +93,12 @@ test('conversation host delegates a game fork to the native DSH Session fork', a
   const { ctx, calls } = hostFixture()
   const host = client.createConversationHostAdapter(ctx)
 
-  assert.equal(await host.forkSession('s-source'), 's-fork')
+  assert.equal(await host.forkSession('s-source', 42), 's-fork')
   assert.equal(calls.length, 1)
   assert.equal(calls[0][0], 'fork')
   assert.equal(calls[0][1].sessionId, 's-source')
   assert.equal(calls[0][1].increaseTitle, true)
+  assert.equal(calls[0][1].atSeq, 42)
 })
 
 test('workspace selection uses alpha.2 workspaceId and the current Session owner', () => {
@@ -171,9 +173,9 @@ test('sidebar and prewarm are wired to the host adapter, with required services 
   assert.equal(client.inject.includes('remote.agentPresets'), false)
   assert.match(source, /ctx\.get\("uiConversation"\) \|\| ctx\.get\("conversation"\)/)
   assert.match(source, /conversationHost: createConversationHostAdapter\(ctx\)/)
-  assert.equal((source.match(/props\.conversationHost\.connectWorkspace\(targetWorkspaceId\)/g) || []).length, 3)
+  assert.equal((source.match(/props\.conversationHost\.connectWorkspace\(targetWorkspaceId\)/g) || []).length, 2)
   assert.match(source, /props\.conversationHost\.ensurePreset\(sessionId, request\)/)
-  assert.match(source, /props\.conversationHost\.forkSession\(item\.sessionId\)/)
+  assert.match(source, /props\.conversationHost\.forkSession\(item\.sessionId, plan\.atSeq\)/)
   assert.doesNotMatch(source, /props\.workspaces\.connectWorkspace|props\.connection\.api|noteAgentPreset/)
   const cleanup = source.slice(source.indexOf('async function archiveCurrentBlankSession'), source.indexOf('async function waitForSessionSummary'))
   assert.match(cleanup, /history\.some\(function \(entry\) \{ return entry\.sessionId === current; \}\)/)

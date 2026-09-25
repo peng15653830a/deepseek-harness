@@ -139,40 +139,60 @@ function prewarmHarness(overrides = {}) {
   return { calls, reports, module: createConversationPrewarmModule(Object.assign(adapters, overrides)) }
 }
 
-test('游戏准备阶段只预热一次，开始游戏直接认领同一个 Session', async function () {
+test('游戏准备只解析 Workspace，认领后才创建 Session', async () => {
   const { calls, module } = prewarmHarness()
-
-  await module.begin({ key: 'cards/a.json' })
-  const sessionId = await module.claim('cards/a.json')
-
-  assert.equal(sessionId, 'session-warm')
-  assert.deepEqual(calls, ['resolve', 'connect'])
+  await module.begin({ key: 'card' })
+  assert.equal(await module.claim('card'), 'workspace-1')
+  assert.deepEqual(calls, ['resolve'])
+  assert.equal(await module.claim('card'), '')
 })
 
-test('关闭游戏准备会清理本次新建但尚未使用的 Session', async function () {
+test('取消尚未完成的工作区预热不会创建 Session，也不能再认领', async () => {
   let release
-  const connected = new Promise(function (resolve) { release = resolve })
-  const { calls, module } = prewarmHarness({
-    connectWorkspace: async function () { calls.push('connect'); return await connected }
-  })
-
-  module.begin({ key: 'cards/a.json' })
+  const { calls, module } = prewarmHarness({ resolveWorkspace: () => new Promise(resolve => { release = resolve }) })
+  const pending = module.begin({ key: 'card' })
+  await Promise.resolve()
   module.cancel()
-  release('session-created')
-  await new Promise(function (resolve) { setImmediate(resolve) })
-
-  assert.deepEqual(calls, ['resolve', 'connect', 'archive:session-created'])
+  release('workspace-1')
+  await pending
+  assert.equal(await module.claim('card'), '')
+  assert.deepEqual(calls, [])
 })
 
-test('关闭游戏准备不会归档原本就存在的空白 Session', async function () {
-  const { calls, module } = prewarmHarness({
-    sessionIds: function () { return ['session-existing'] },
-    connectWorkspace: async function () { calls.push('connect'); return 'session-existing' }
-  })
+test('反复选择人物卡并取消不会创建或归档任何 Session', async () => {
+  const { calls, module } = prewarmHarness()
+  for (let i = 0; i < 5; i++) { await module.begin({ key: 'card' + i }); module.cancel() }
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.filter(item => item === 'connect' || item.startsWith('archive:')).length, 0)
+})
 
-  await module.begin({ key: 'cards/a.json' })
-  module.cancel()
-  await new Promise(function (resolve) { setImmediate(resolve) })
+test('初始化失败后重试复用已创建 Session', async () => {
+  let attempts = 0
+  const { calls, module } = harness({ createChat: async () => { if (++attempts === 1) throw new Error('初始化失败') } })
+  const request = { kind: 'play', targetMode: 'story' }
+  await assert.rejects(module.start(request), /初始化失败/)
+  await module.start(request)
+  assert.equal(calls.filter(item => item.startsWith('connect:')).length, 1)
+})
 
-  assert.deepEqual(calls, ['resolve', 'connect'])
+
+test('刷新页面后可复用失败 Session，打开失败不重复初始化，成功后下次新建', async () => {
+  const values = new Map()
+  const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) }
+  const request = { kind: 'play', targetMode: 'story', card: { path: 'card' }, preparationId: 'preview-1' }
+  const first = harness({ attempts: client.createConversationAttemptStore(storage), finishOpen: async () => { throw new Error('打开失败') } })
+  await assert.rejects(first.module.start(request), /打开失败/)
+  assert.equal(values.size, 1)
+  const second = harness({ attempts: client.createConversationAttemptStore(storage) })
+  await second.module.start({ ...request, preparationId: 'preview-2' })
+  assert.equal(second.calls.some(item => item.startsWith('connect:') || item.startsWith('chat:')), false)
+  assert.equal(values.size, 0)
+  await second.module.start(request)
+  assert.equal(second.calls.filter(item => item.startsWith('connect:')).length, 1)
+})
+
+test('同一次开始操作并发触发只创建一条会话', async () => {
+  const { module, calls } = harness()
+  await Promise.all([module.start({ kind: 'play' }), module.start({ kind: 'play' })])
+  assert.equal(calls.filter(item => item.startsWith('connect:')).length, 1)
 })

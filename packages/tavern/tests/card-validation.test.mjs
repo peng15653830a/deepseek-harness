@@ -55,3 +55,23 @@ test('production tool reads disk through native DSH schema and rejects play-mode
   mode = 'story'
   await assert.rejects(tool.execute({}, exec), /卡片工作台/)
 })
+
+test('legacy workspace with V3 marker and flat fields remains editable and validates without migration', async () => {
+  const { createCardPreparation } = await import('../tavern-plugin/lib/domain/card-preparation.js')
+  const cards = createCardPreparation({ id: () => 'fixture', now: () => 1 })
+  const raw = { spec: 'chara_card_v3', name: '铜铃客栈', description: '旧设定', first_mes: '欢迎', extensions: { custom: { keep: true } } }
+  const workspace = { kind: 'dsh-tavern-character-workspace', version: 1, raw, meta: { id: 'fixture' } }
+  assert.equal(cards.project(workspace).description, '旧设定')
+  assert.equal(check(workspace).valid, true)
+  const changed = cards.update({ kind: 'card', card: workspace, patch: { description: '先介绍一位旅人，再引入新人物。' } }).card
+  const before = JSON.stringify(changed)
+  assert.equal(cards.project(changed).description, '先介绍一位旅人，再引入新人物。')
+  assert.equal(changed.raw.data, undefined)
+  assert.deepEqual(changed.raw.extensions, raw.extensions)
+  assert.equal(workspace.raw.description, '旧设定')
+  assert.equal(validateCardText(before).valid, true)
+  assert.equal(JSON.stringify(changed), before)
+  assert.equal(check({ ...raw, description: [] }).valid, false)
+  assert.equal(check({ ...raw, spec: 'unknown' }).valid, false)
+  assert.equal(check({ ...raw, data: [] }).valid, false)
+})

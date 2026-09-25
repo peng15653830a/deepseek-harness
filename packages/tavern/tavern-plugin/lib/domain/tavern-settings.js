@@ -7,24 +7,42 @@ function object(value) {
 
 function promptOverride(document, name) {
   const value = object(document.promptOverrides)[name]
-  return typeof value === 'string' && value.trim() !== '' ? value : null
+  return typeof value === 'string' && (value.trim() !== '' || name === 'system-append') ? value : null
 }
 
 export function normalizeBackgroundTasks(value) {
   const tasks = object(value)
-  return { posture: tasks.posture !== false, characterDesign: tasks.characterDesign === true, variables: tasks.variables !== false, ledger: false }
+  return { posture: tasks.posture !== false, characterDesign: false, variables: tasks.variables !== false, ledger: false }
 }
 
 export function applyTavernSettingsPatch(current, patch) {
   const next = Object.assign({}, object(current))
   const input = object(patch)
+  if (Object.hasOwn(input, 'defaultWritingSkill')) {
+    const { name, enabled } = object(input.defaultWritingSkill)
+    if (typeof name !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || typeof enabled !== 'boolean') throw new Error('无效的写作 Skill 配置')
+    const disabled = Array.isArray(next.defaultDisabledWritingSkills) ? next.defaultDisabledWritingSkills : []
+    next.defaultDisabledWritingSkills = enabled ? disabled.filter(value => value !== name) : [...new Set([...disabled, name])]
+  }
+  for (const name of ['defaultForegroundModel', 'defaultBackgroundModel']) {
+    if (!Object.hasOwn(input, name)) continue
+    const selection = normalizeBackgroundModel(input[name])
+    if (input[name] !== null && !selection) throw new Error('默认模型配置无效')
+    next[name] = selection
+  }
+  if (Object.hasOwn(input, 'candidateDismissMode')) {
+    if (!['after-fill', 'after-send'].includes(input.candidateDismissMode)) throw new Error('无效的候选项收起方式')
+    next.candidateDismissMode = input.candidateDismissMode
+  }
   if (Object.hasOwn(input, 'contextCompaction')) next.contextCompaction = { ...compactionPolicy(input.contextCompaction), revision: Date.now() }
   if (Object.prototype.hasOwnProperty.call(input, 'backgroundTasks')) {
     next.backgroundTasks = normalizeBackgroundTasks({ ...normalizeBackgroundTasks(next.backgroundTasks), ...object(input.backgroundTasks) })
   }
   if (Object.prototype.hasOwnProperty.call(input, 'compatibilityMode')) next.compatibilityMode = input.compatibilityMode === true
+  if (Object.hasOwn(input, 'systemAppendEnabled')) next.systemAppendEnabled = input.systemAppendEnabled === true
   if (Object.prototype.hasOwnProperty.call(input, 'webSearchEnabled')) next.webSearchEnabled = input.webSearchEnabled === true
   if (Object.prototype.hasOwnProperty.call(input, 'backgroundModel')) {
+    next.backgroundModelRevision = (Number.isSafeInteger(next.backgroundModelRevision) ? next.backgroundModelRevision : 0) + 1
     if (input.backgroundModel === null) delete next.backgroundModel
     else {
       const backgroundModel = normalizeBackgroundModel(input.backgroundModel)
@@ -41,7 +59,7 @@ export function applyTavernSettingsPatch(current, patch) {
     if (promptChange.text === null) {
       delete overrides[name]
     } else {
-      if (typeof promptChange.text !== 'string' || promptChange.text.trim() === '') throw new Error('系统提示词不能为空')
+      if (typeof promptChange.text !== 'string' || (promptChange.text.trim() === '' && name !== 'system-append')) throw new Error('系统提示词不能为空')
       if (promptChange.text.length > 100000) throw new Error('系统提示词不能超过 100000 字符')
       overrides[name] = promptChange.text.trim()
     }
@@ -52,7 +70,7 @@ export function applyTavernSettingsPatch(current, patch) {
     const values = object(input.systemPrompts)
     const overrides = Object.assign({}, object(next.promptOverrides))
     for (const [name, value] of Object.entries(values)) {
-      if (typeof value !== 'string' || value.trim() === '') throw new Error('系统提示词不能为空: ' + name)
+      if (typeof value !== 'string' || (value.trim() === '' && name !== 'system-append' && name !== 'card-system')) throw new Error('系统提示词不能为空: ' + name)
       if (value.length > 100000) throw new Error('系统提示词不能超过 100000 字符: ' + name)
       overrides[name] = value.trim()
     }
@@ -75,9 +93,14 @@ export function presentTavernSettings(document, defaults) {
   })
   const story = prompts.find(function (item) { return item.name === 'story' }) || { text: '', customized: false }
   return {
+    defaultDisabledWritingSkills: Array.isArray(object(document).defaultDisabledWritingSkills) ? object(document).defaultDisabledWritingSkills.filter(name => typeof name === 'string') : [],
+    defaultForegroundModel: normalizeBackgroundModel(object(document).defaultForegroundModel),
+    defaultBackgroundModel: normalizeBackgroundModel(object(document).defaultBackgroundModel),
     contextCompaction: compactionPolicy(object(document).contextCompaction),
+    candidateDismissMode: object(document).candidateDismissMode === 'after-send' ? 'after-send' : 'after-fill',
     compatibilityMode: true,
     webSearchEnabled: object(document).webSearchEnabled === true,
+    systemAppendEnabled: object(document).systemAppendEnabled === true,
     backgroundModel: normalizeBackgroundModel(object(document).backgroundModel),
     backgroundTasks: normalizeBackgroundTasks(object(document).backgroundTasks),
     // Card rendering uses a fixed trusted policy; legacy preferences are no longer applied.

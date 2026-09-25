@@ -9,25 +9,9 @@ function settingsObject(value) {
 }
 
 /** Profile-owned plugin namespaces, separate from DSH settings and chat history. */
-export function createTavernExtensionSettings(profileData, { templateRuntime } = {}) {
-  async function project(value) {
-    const settings = settingsObject(value)
-    if (templateRuntime) {
-      let enabled = false
-      try { enabled = Boolean(await templateRuntime()) } catch { /* Unavailable runtimes must not report ready. */ }
-      settings.EjsTemplate = { ...settings.EjsTemplate, enabled }
-    }
-    return settings
-  }
-  function writable(value) {
-    const settings = settingsObject(value)
-    // Runtime readiness is host-owned, not a persisted extension preference.
-    if (templateRuntime && settings.EjsTemplate) {
-      delete settings.EjsTemplate.enabled
-      if (!Object.keys(settings.EjsTemplate).length) delete settings.EjsTemplate
-    }
-    return settings
-  }
+export function createTavernExtensionSettings(profileData) {
+  const project = settingsObject
+  const writable = settingsObject
   async function read() { return project(await profileData.readJson(settingsPath) ?? {}) }
 
   async function save(settings, expectedSettings) {

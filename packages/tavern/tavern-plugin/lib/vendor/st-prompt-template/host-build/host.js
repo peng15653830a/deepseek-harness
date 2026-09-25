@@ -23,7 +23,7 @@ export let world_info = {}, selected_world_info = [], world_names = []
 export let name1 = '', name2 = '', user_avatar = '', main_api = '', online_status = ''
 export let world_info_case_sensitive = false, world_info_match_whole_words = false, world_info_use_group_scoring = false, world_info_max_recursion_steps = 0
 export let yaml
-let host, sessionId, configured = false
+let host, sessionId, configured = false, projectionDepth = 0
 const commands = new Map()
 
 export function configureTemplateHost(snapshot, callbacks, libraries) {
@@ -56,7 +56,8 @@ function call(name, ...args) {
 export function getCurrentChatId() { return sessionId }
 export function getGroupMembers(id = selected_group) { const group = groups.find(item => item.id === id); return group ? group.members.map(avatar => characters.find(c => c.avatar === avatar)).filter(Boolean) : [] }
 export function getChatCompletionModel() { return call('getChatCompletionModel') }
-export function saveChatConditional(...args) { return call('saveChatConditional', { chat, chat_metadata, extension_settings }, ...args) }
+export async function withTemplateProjection(action) { projectionDepth++; try { return await action() } finally { projectionDepth-- } }
+export function saveChatConditional(...args) { if (projectionDepth) return Promise.resolve(); return call('saveChatConditional', { chat, chat_metadata, extension_settings }, ...args) }
 export function saveSettingsDebounced() { return call('saveSettingsDebounced', extension_settings) }
 export function renderExtensionTemplateAsync(...args) { return call('renderExtensionTemplateAsync', ...args) }
 export function loadWorldInfo(...args) { return call('loadWorldInfo', ...args) }

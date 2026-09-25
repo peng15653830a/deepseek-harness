@@ -102,3 +102,14 @@ test('服务重启后遗留的 pending 私聊显示为已中断，不会永远�
   assert.equal(projected.threads[0].messages[0].status, 'failed')
   assert.match(projected.threads[0].messages[0].error, /服务重启或中断/)
 })
+
+test('关闭姿势结算后手机新请求不携带旧姿势但保留剧情和存档', async () => {
+  const run = fixture(), calls = []
+  await run.store.updateChat('chat-1', chat => ({ ...chat, backgroundTasks: { posture: false } }))
+  const service = createPhoneChat({ store: run.store, selection: () => ({ provider: 'test', model: 'roleplay' }),
+    runAgent: async input => { calls.push(input); return { text: '收到' } }, id: run.id })
+  await service.send({ sessionId: 'session-1', contactId: encodeURIComponent('周宁'), requestId: 'disabled-posture', text: '你好' })
+  assert.ok(!calls[0].turnContext.includes(run.chat().posture))
+  assert.match(calls[0].turnContext, /最近剧情/)
+  assert.equal(run.chat().posture, '林岚正在书房看雨。')
+})

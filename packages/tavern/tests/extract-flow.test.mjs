@@ -130,20 +130,21 @@ test('游玩中可修改玩家称呼，Tavern 不接管正文发送状态', () =
   assert.match(serverSource, /case 'setPlayerName'/)
   assert.match(player, /rpc\("setPlayerName", \{ userName: next \}, props\.sessionId\)/)
   assert.match(player, /仅影响之后生成的内容/)
-  assert.match(clientSource, /id: "dsh-tavern-player-name"/)
+  assert.match(clientSource, /id: "dsh-tavern-conversation-settings"/)
   assert.doesNotMatch(clientSource, /TavernSignalTimeoutNotice/)
   assert.doesNotMatch(clientSource, /dsh-tavern-signal-timeout/)
 })
 
-test('Tavern 游玩对话顶栏显示创建时固化的整份预设', () => {
-  const player = between(clientSource, 'function TavernPlayerNameAction', 'function TavernStatusPanel')
-  const view = between(serverSource, 'async function view(chat, card)', 'function replyProjectionsOf')
+test('本局设置显示本局预设并通过已有接口切换', () => {
+  const player = between(clientSource, 'function TavernConversationPreset', 'function TavernConversationSettingsTab')
+  const view = between(serverSource, 'async function view(chat, card,', 'function replyProjectionsOf')
 
   assert.match(view, /groupOfMode\(chat\.mode\) === 'play' && chat\.runtimePresetSnapshot/)
   assert.match(view, /runtimePreset: activePresetSnapshot === null \? null : \{ id: activePresetSnapshot\.presetPath, name: activePresetSnapshot\.presetName \}/)
-  assert.match(player, /const presetName = view\.runtimePreset && view\.runtimePreset\.name \? view\.runtimePreset\.name : "无"/)
-  assert.match(player, /"当前预设：" \+ presetName/)
-  assert.match(clientSource, /dsh-tavern-preset-status/)
+  assert.match(player, /session.view\?\.runtimePreset/)
+  assert.match(player, /"本局预设"/)
+  assert.match(player, /rpc\("applyConversationPreset"/)
+
 })
 
 test('手机宽度隐藏顶栏长预设条目标签，避免挤压会话标题', () => {
@@ -174,8 +175,8 @@ test('新开游玩在创建 Session 前完成游戏准备，创建后不提供�
   assert.match(sidebar, /开始新游戏/)
   assert.match(sidebar, /游戏准备/)
 	  assert.match(sidebar, /故事中的玩家称呼（可选）/)
-	  assert.match(sidebar, /selectedOpening && selectedOpening\.usesUser/)
-	  assert.match(sidebar, /不填则使用“你”/)
+	  assert.doesNotMatch(sidebar, /selectedOpening && selectedOpening\.usesUser/)
+	  assert.match(sidebar, /默认沿用你上次使用的称呼/)
 	  assert.match(serverSource, /projectCardOpeningPreviews\(/)
   assert.match(sidebar, /dsh-tavern-player-name/)
   assert.match(sidebar, /preparePlayConversation\(card\)/)
@@ -186,7 +187,7 @@ test('新开游玩在创建 Session 前完成游戏准备，创建后不提供�
   assert.match(sidebar, /dsh-tavern-picker-overlay/)
   assert.match(sidebar, /role: "dialog"/)
 	assert.match(sidebar, /renderTavernProjection\(selectedOpening\.projection/)
-	assert.match(openingChoice, /!busy && selectedOpening \? h\("div"/,
+	assert.match(openingChoice, /selectedOpening \? h\("div"/,
 		'只有一个开场白时也必须在点击开始游戏前持续显示预览')
 	assert.doesNotMatch(openingChoice, /!busy && selectedOpening && openingPicker\.openings\.length > 1/)
 	assert.match(sidebar, /key: selectedOpening\.id/)
@@ -240,7 +241,7 @@ test('Tavern 错误面板只保留最新错误，左侧栏连接恢复后撤销�
   assert.match(clientSource, /const lastReported = React\.useRef\(""\)/)
   assert.match(clientSource, /visible !== lastReported\.current/)
   assert.match(clientSource, /if \(!visible\) tavernErrorHub\.resolve\(source\)/)
-  assert.match(sidebar, /if \(collapsed\) return h\(React\.Fragment, null,\s*h\(TavernErrorCenter\)/)
+  assert.doesNotMatch(sidebar, /if \(collapsed\) return/)
   assert.match(sidebar, /return h\(React\.Fragment, null, h\(TavernErrorCenter\)/)
   assert.match(clientSource, /usePersistentError\("左侧栏操作"\)/)
   assert.match(sidebar, /latest\.message === "DSH Session 列表同步超时，请刷新页面后重试：" \+ current/)
@@ -249,7 +250,7 @@ test('Tavern 错误面板只保留最新错误，左侧栏连接恢复后撤销�
   assert.match(sidebar, /tavernErrorHub\.resolve\("左侧栏历史"\)/)
   assert.match(sidebar, /tavernErrorHub\.report\("左侧栏人物卡", err\)/)
   assert.match(sidebar, /tavernErrorHub\.report\("左侧栏历史", err\)/)
-  assert.match(clientSource, /usePersistentError\("剧本库"\)/)
+  assert.match(clientSource, /usePersistentError\("剧本与素材库"\)/)
   assert.match(clientSource, /usePersistentError\("预设库"\)/)
   assert.doesNotMatch(clientSource, /usePersistentError\("破限方案库"\)/)
   assert.match(clientSource, /usePersistentError\("人物卡库"\)/)
@@ -267,11 +268,11 @@ test('Tavern 错误面板只保留最新错误，左侧栏连接恢复后撤销�
 })
 
 test('展示投影通过正式消息 renderer 渲染，并在配置变化后重算历史', () => {
-  const view = between(serverSource, 'async function view(chat, card)', 'function replyProjectionsOf')
+  const view = between(serverSource, 'async function view(chat, card,', 'function replyProjectionsOf')
   const renderer = between(clientSource, 'function createTavernAssistantRendererFeatureModule', 'function createTavernShellFeatureModule')
 
   assert.match(serverSource, /function replyProjectionsOf\(chat\)/)
-  assert.match(view, /projectRuntimeReplyHistory\(chat\.messages/)
+  assert.match(view, /incrementalReplyView\.project\(persistedProjection \? chat/)
   assert.match(view, /replyProjections: replyDisplay\.projections/)
   assert.match(view, /inputSources/)
   assert.match(renderer, /key: "assistant-step"/)
@@ -306,7 +307,7 @@ test('自由行动只聚焦输入框并保留已生成候选项', () => {
 })
 
 test('后台结算期间禁用候选项按钮，完成后自动恢复', () => {
-  const action = between(clientSource, 'function CandidateAction', 'function CandidateDockActions')
+  const action = between(clientSource, 'function CandidateAction', 'function TavernRollbackAction')
   const coordination = between(clientSource, 'const tavernCoordination', 'function describeTavernActivity')
   const submit = between(clientSource, 'async function submitCandidateTask', 'const regenPanel')
   const guide = between(clientSource, 'function CandidateGuidePanel', 'function RegenPanel')
@@ -348,7 +349,7 @@ test('酒馆状态读取 MVU 回执时使用当前模块可用的复制能力', 
 test('失败的最新后台结算可以按原任务类型原地重试', () => {
 	const retry = between(serverSource, 'async function retrySettlement', 'async function pullBackgroundCycle')
 	const settlement = between(serverSource, 'async function runSettlement', 'function queueSettlement')
-	const view = between(serverSource, 'async function view(chat, card)', 'function replyProjectionsOf')
+	const view = between(serverSource, 'async function view(chat, card,', 'function replyProjectionsOf')
 	assert.match(retry, /只能重试当前最新正文的后台结算/)
 	assert.match(retry, /target\.message\.mvu = \{ pending: true/)
 	assert.match(retry, /void queueSettlement\(chat\.id\)/)
@@ -361,7 +362,7 @@ test('失败的最新后台结算可以按原任务类型原地重试', () => {
 })
 
 test('正文重新生成合并为一个入口，空意见和有意见复用同一替换流程', () => {
-	const action = between(clientSource, 'function CandidateAction', 'function CandidateDockActions')
+	const action = between(clientSource, 'function CandidateAction', 'function TavernRollbackAction')
 	const shared = between(clientSource, 'async function submitBodyRegeneration', 'function CandidateAction')
 	const panel = between(clientSource, 'function RegenPanel', 'function register')
 
@@ -454,7 +455,7 @@ test('卡片模式通过人物卡、剧本、世界书、预设和空白入口�
   assert.match(clientSource, /"空白开始"/)
 	assert.doesNotMatch(clientSource, /请先从右侧侧边栏的对应资源库导入人物卡、剧本、世界书或预设文件。/)
 	assert.match(clientSource, /initialImportLabel = cardEntry === "worldbook" \? "导入世界书"/)
-	assert.match(clientSource, /cardEntry === "extract" \|\| cardEntry === "script" \? "导入剧本"/)
+	assert.match(clientSource, /cardEntry === "extract" \|\| cardEntry === "script" \? "导入剧本或素材"/)
 	assert.match(clientSource, /importInitialResource\(f, cardEntry\)/)
 	assert.match(clientSource, /暂无可选.*可点击右上角导入/)
 	assert.match(flow, /kind: "card", targetMode: "card"/)
@@ -473,7 +474,7 @@ test('人物卡转 MVU 起始任务写入 Skill、目标卡与简短转换要求
   assert.match(sidebar, /newCardConversation\(card, "mvu", "把人物卡转成 MVU 版"\)/)
   assert.match(sidebar, /转换为 MVU 后，状态栏绝对不会掉格式/)
   assert.match(injectTaskPrompt, /if \(task === "mvu"\)/)
-  assert.match(injectTaskPrompt, /\/tavern-card-to-mvu\\n\\n【目标人物卡】\\n@/)
+  assert.match(injectTaskPrompt, /\/card-to-mvu\\n\\n【目标人物卡】\\n@/)
   assert.match(injectTaskPrompt, /把这张人物卡转换为独立的 MVU 版本/)
   assert.match(injectTaskPrompt, /移除原卡自带的候选项生成提示、按钮、正则和专用脚本/)
   assert.match(injectTaskPrompt, /统一使用 DSH Tavern 内置候选项/)
@@ -489,7 +490,7 @@ test('用户画像只从右侧栏进入，开场准备和起始任务不展示�
   assert.doesNotMatch(opening, /用户画像|userProfile|长期偏好/)
   assert.doesNotMatch(taskPicker, /用户画像|user-profile/)
   assert.match(injectTaskPrompt, /if \(task === "user-profile"\)/)
-  assert.match(injectTaskPrompt, /\/tavern-user-profile/)
+  assert.match(injectTaskPrompt, /\/user-profile/)
   assert.doesNotMatch(sidebar, /userProfileEnabled|response\.userProfile/)
 })
 
@@ -499,15 +500,17 @@ test('用户画像右侧栏聚焦实际生效偏好，详细依据折叠并可�
 
   assert.match(profileTab, /getUserPreferenceProfile/)
   assert.match(profileTab, /updateUserPreferenceProfile/)
-  assert.match(profileTab, /setUserPreferenceProfileDefaultEnabled/)
+  assert.match(profileTab, /manageUserPreferenceProfile/)
   assert.doesNotMatch(profileTab, /完整画像/)
-  assert.match(profileTab, /实际生效的偏好/)
+  assert.match(profileTab, /画像内容/)
   assert.match(profileTab, /偏好维度/)
   assert.match(profileTab, /原始回答/)
-  assert.match(profileTab, /新游戏默认启用/)
-  assert.match(profileTab, /仅在此处开启或关闭/)
+  assert.match(profileTab, /新游戏默认画像/)
+  assert.match(profileTab, /当前游戏画像/)
   assert.doesNotMatch(profileTab, /准备页仍可单局覆盖/)
-  assert.match(profileTab, /本局创建后保持冻结/)
+  assert.match(profileTab, /setConversationUserProfileEnabled/)
+  assert.doesNotMatch(between(profileTab, "async function toggleCurrent", "function beginEdit"), /window\.confirm/)
+  assert.doesNotMatch(profileTab, /本局创建后保持冻结/)
   assert.match(profileTab, /dsh-tavern-open-user-profile-task/)
   assert.match(sidebar, /addEventListener\("dsh-tavern-open-user-profile-task"/)
   assert.match(serverSource, /case 'getUserPreferenceProfile'/)
@@ -536,7 +539,7 @@ test('世界书库在卡片对话中可引用独立或内置世界书', () => {
   assert.match(clientSource, /tavern-worldbook:/)
 })
 
-test('人物卡抽取与剧本修改都使用剧本库，并自动追加引用', () => {
+test('人物卡抽取与剧本修改都使用剧本与素材库，并自动追加引用', () => {
   const sidebar = between(clientSource, 'function TavernSidebar', 'function TavernResourcesTab')
   const recovery = between(sidebar, 'async function finishPendingOpen', 'async function retryPendingOpen')
 
@@ -605,20 +608,21 @@ test('游玩不提供 Swipe 分支切换，只保留整轮正文重新生成', (
 	assert.doesNotMatch(serverSource, /case 'switchTavernSwipe'/)
 })
 
-test('酒馆状态页注册到 Better Sidebar，不再接管 DSH details', () => {
+test('游玩默认打开本局设置，酒馆状态仍保留为独立侧栏', () => {
   const sidebar = between(clientSource, 'function TavernSidebar', 'function CardFieldsPanel')
 
   assert.match(sidebar, /readyTavernSession/)
   assert.match(sidebar, /summaries\[current\]\.blank === false/)
   assert.match(sidebar, /history\.some\(function \(entry\) \{ return entry\.sessionId === current && isPlayMode\(entry\.mode\); \}\)/)
-  assert.match(sidebar, /props\.openStatusTab\(readyTavernSession\)/)
-  assert.match(sidebar, /props\.openStatusTab\(pending\.sessionId\)/)
+  assert.match(clientSource, /openConversationSettingsTab: async function \(sessionId\) \{ await ctx\.betterSidebar\.openTab\(\{ type: "dsh-tavern:conversation-settings" \}/)
+  assert.match(sidebar, /props\.openConversationSettingsTab\(readyTavernSession\)/)
+  assert.match(sidebar, /props\.openConversationSettingsTab\(pending\.sessionId\)/)
   assert.match(clientSource, /ctx\.betterSidebar\.registerTab\(\{/)
   assert.match(clientSource, /id: "dsh-tavern:status"/)
   assert.match(clientSource, /patch: \{ panelOpen: true \}/)
   assert.doesNotMatch(clientSource, /className: "dsh-tavern-status-presentation"/)
   assert.doesNotMatch(clientSource, /buildOpeningPreviewDocument\(view\.presentation\.html\)/)
-  assert.match(clientSource, /ctx\.betterSidebar\.openTab\(\{ type: "dsh-tavern:status" \}/)
+  assert.match(clientSource, /ctx\.betterSidebar\.openTab\(\{ type: "dsh-tavern:conversation-settings" \}/)
   assert.doesNotMatch(clientSource, /slots\.inject\("details"|openDetails|ensureDetailsOpen/)
 })
 
@@ -635,7 +639,7 @@ test('左侧栏常驻显示版本与构建号，并把检查更新和进行更�
   assert.doesNotMatch(sidebar, /重新检查/)
   assert.match(sidebar, /进行更新/)
   assert.match(sidebar, /updateStatus\.phase !== "update-available"/)
-  assert.match(sidebar, /正在通过 jsDelivr 检查最新构建/)
+  assert.match(sidebar, /正在向 GitHub 核实最新构建/)
   assert.match(sidebar, /未发现更新构建/)
   assert.match(sidebar, /发现新构建/)
   assert.match(sidebar, /未发现更新构建/)
@@ -696,7 +700,8 @@ test('预设库选择整份预设，并可交给卡片 Agent 编辑或在当前�
   assert.match(panel, /dsh-tavern-external-preset-notice/)
   assert.match(panel, /rpc\("selectPreset"/)
   assert.match(panel, /dsh-tavern-preset-selector/)
-  assert.match(panel, /当前使用的预设/)
+  assert.match(panel, /新游戏默认预设/)
+  assert.doesNotMatch(panel, /当前游戏预设|应用到当前游戏|applyConversationPreset/)
   assert.match(panel, /不使用外部预设（默认）/)
   assert.match(panel, /onChange: function \(event\) \{ selectPreset\(event\.target\.value\); \}/)
   assert.match(panel, /一般用内置设置就够了/)
@@ -716,10 +721,10 @@ test('预设库选择整份预设，并可交给卡片 Agent 编辑或在当前�
   assert.match(panel, /"← 返回预设库"/)
 	assert.match(panel, /编辑前／中／后三段预设/)
 	assert.match(panel, /前、中、后表示这些内容放在提示词的什么位置/)
-	assert.match(panel, /这里的修改只对新开的一局生效/)
-	assert.match(panel, /已经开始的游戏仍用开局时的预设/)
+	assert.match(panel, /本局设置/)
+	assert.match(panel, /这会使提示词缓存失效/)
 	assert.match(panel, /酒馆的预设可以导入使用/)
-	assert.match(panel, /想用修改后的预设，需要新开一局/)
+	assert.match(panel, /临时切换当前游戏的预设/)
 	assert.doesNotMatch(panel, /下一轮游玩请求直接生效|保存后下一轮游玩直接生效/)
   assert.match(panel, /预设会影响游玩时的正文生成/)
   assert.match(panel, /负责后台工作的 Agent 不使用这些预设/)
@@ -778,25 +783,25 @@ test('卡片模式预加载人物卡、预设、世界书和剧本四个库', ()
   assert.match(clientSource, /openCardLibraryTab: function \(sessionId\) \{ ctx\.betterSidebar\.openTab\(\{ type: "dsh-tavern:cards" \}/)
   assert.match(clientSource, /ctx\.betterSidebar\.updateTab\("dsh-tavern:cards", \{ meta: null \}\)/)
   assert.match(clientSource, /registerTab\(\{\s*id: "dsh-tavern:resources"/)
-  assert.match(clientSource, /id: "dsh-tavern:resources",\s*title: "剧本库"/)
+  assert.match(clientSource, /id: "dsh-tavern:resources",\s*title: "剧本与素材库"/)
   assert.match(clientSource, /id: "dsh-tavern:worldbooks",\s*title: "世界书库"/)
   assert.match(clientSource, /function reconcileLibraryTabTitles\(\)/)
-  assert.match(clientSource, /"dsh-tavern:resources": "剧本库"/)
+  assert.match(clientSource, /"dsh-tavern:resources": "剧本与素材库"/)
   assert.match(clientSource, /subscribeState\(reconcileLibraryTabTitles\)/)
   assert.match(clientSource, /openTab\(\{ type: "dsh-tavern:resources" \}/)
   assert.doesNotMatch(clientSource, /openTab\(\{ type: "editor", id: "dsh-tavern:files"/)
-  assert.match(clientSource, /group\("剧本", "source", resources\.resources/)
+  assert.match(clientSource, /group\("剧本与素材", "source", resources\.resources/)
   assert.doesNotMatch(clientSource, /group\("素材", "source"/)
   assert.doesNotMatch(clientSource, /group\("剧本", "script"/)
   assert.match(clientSource, /kind === "worldbook".*tavern-worldbook:/)
   assert.match(clientSource, /: "@\\\"" \+ safePath \+ "\\\""/)
   assert.match(clientCss, /body\.dsh-tavern-shell-active \[data-ref-chip="file"\].*max-width: calc\(100% - 4px\).*text-overflow: ellipsis/s)
-  assert.match(clientCss, /\.dsh-tavern-candidate-question \{ max-width: 680px; \}/)
+  assert.match(clientCss, /\.dsh-tavern-question\.dsh-tavern-candidate-question \{ width: calc\(100% - 32px\); max-width: min\(680px, var\(--dsh-composer-card-max-width, 780px\)\); \}/)
   assert.match(clientSource, /rpc\("importSource"/)
   assert.match(clientSource, /已绑定：/)
   assert.match(clientSource, /未绑定/)
   assert.match(clientSource, /rpc\("getResource", \{ path: item\.path \}/)
-  assert.match(clientSource, /"← 返回剧本库"/)
+  assert.match(clientSource, /"← 返回剧本与素材库"/)
   assert.match(clientSource, /setOpenedScript\(null\)/)
   assert.doesNotMatch(clientSource, /props\.openResource\(item\.previewPath, label\)/)
   assert.match(clientSource, /function parseTextResourceFile/)
@@ -804,7 +809,7 @@ test('卡片模式预加载人物卡、预设、世界书和剧本四个库', ()
   assert.match(clientSource, /application\/epub\+zip/)
 })
 
-test('剧本库可以把未绑定剧本绑定给未绑定人物卡，并可直接解绑', () => {
+test('剧本与素材库可以把未绑定剧本绑定给未绑定人物卡，并可直接解绑', () => {
   const library = between(clientSource, 'function TavernResourcesTab', 'function register(input)')
 
   assert.match(library, /setCards\(all\[0\] && all\[0\]\.cards \|\| \[\]\)/)
@@ -907,7 +912,7 @@ test('人物卡 Agent 保存后重新读取已打开的详情，未变化时不�
 
 test('删除对话时把缺失 Session 视为已经归档，并继续清理 Tavern 对话', () => {
   const sidebar = between(clientSource, 'function TavernSidebar', 'function TavernResourcesTab')
-  const deletion = between(sidebar, 'async function deleteConversation', 'async function exportCard')
+  const deletion = between(sidebar, 'async function deleteConversation', 'async function forkConversation')
 
   assert.match(sidebar, /function isMissingSessionArchiveError\(error\)/)
   assert.match(deletion, /catch \(archiveError\)/)
@@ -925,7 +930,7 @@ test('Session 顶栏工具区可以把服务端投影后的纯对话下载为 TX
   assert.match(exporter, /rpc\("exportConversation", \{ title: summary && summary\.displayTitle \|\| "" \}, props\.sessionId\)/)
   assert.match(exporter, /text\/plain;charset=utf-8/)
   assert.match(exporter, /new Blob\(\["\\uFEFF", result\.text\]/)
-  assert.match(exporter, /"纯对话 TXT ↓"/)
+  assert.match(exporter, /"纯对话 TXT"/)
   assert.match(clientSource, /slots\.inject\("conversation\.session\.header\.utilities"/)
   assert.match(clientSource, /id: "dsh-tavern-conversation-export"/)
   assert.doesNotMatch(sidebar, /导出 TXT|exportConversation/)
@@ -994,7 +999,7 @@ test('人物卡绑定目录超时后可在原位置重新读取', () => {
   assert.match(panel, /onClick: function \(\) \{ loadWorldBookCatalog\(true\); \}/)
 })
 
-test('人物卡全部字段合并在默认展开的基本信息中，并位于世界书上方', () => {
+test('人物卡世界书优先展示，基本信息保留全部字段，两者默认展开', () => {
   const panel = between(clientSource, 'function CardFieldsPanel', 'function TavernStatusPanel')
   const basic = panel.indexOf('h("summary", null, "基本信息")')
   const alternateGreetings = panel.indexOf('F("alternate_greetings"')
@@ -1004,7 +1009,9 @@ test('人物卡全部字段合并在默认展开的基本信息中，并位于�
   assert.ok(basic >= 0)
   assert.ok(alternateGreetings > basic)
   assert.ok(creatorNotes > alternateGreetings)
-  assert.ok(worldBook > creatorNotes)
+  assert.ok(worldBook >= 0 && worldBook < basic)
+  assert.match(panel, /h\("details", \{ ref: worldBookDetailsRef, open: true,/)
+  assert.match(panel, /h\("details", \{ className: "dsh-tavern-card-advanced", open: true \}, h\("summary", null, "基本信息"\)/)
   assert.doesNotMatch(panel, /h\("summary", null, "高级字段"\)/)
 })
 
@@ -1029,13 +1036,19 @@ test('世界书库统一编辑独立世界书与人物卡内置世界书', () =>
   assert.match(library, /function WorldBookLibraryTab/)
   assert.match(library, /group\("独立世界书"/)
   assert.match(library, /group\("人物卡内置世界书"/)
+  assert.match(library, /"最新"/)
+  assert.match(library, /"最旧"/)
+  assert.match(library, /"最近"/)
+  assert.match(library, /"A-Z"/)
+  assert.match(library, /"Z-A"/)
+  assert.match(library, /orderWorldBookCatalogItems/)
   assert.match(library, /rpc\("importWorldBook"/)
   assert.match(library, /rpc\("updateWorldBook"/)
   assert.match(library, /const \[catalog, setCatalog\] = React\.useState\(null\)/)
   assert.match(library, /rpcWithTimeout\("listWorldBooks"/)
   assert.match(library, /rpcWithTimeout\("getWorldBookAssociations"/)
-  assert.match(library, /"绑定人物卡"/)
-  assert.match(library, /多本世界书可能相互冲突，引发异常/)
+  assert.match(library, /"已绑定人物卡"/)
+  assert.match(library, /同时绑定多本世界书时，请留意内容冲突/)
   assert.match(library, /rpc\("bindWorldBook"/)
   assert.match(library, /rpc\("unbindWorldBook"/)
   assert.match(library, /"正在读取世界书…"/)
@@ -1046,7 +1059,7 @@ test('世界书库统一编辑独立世界书与人物卡内置世界书', () =>
   assert.match(library, /createWorldBookLibraryRefreshModule/)
   assert.doesNotMatch(library, /window\.addEventListener\("focus"/)
   assert.doesNotMatch(library, /document\.addEventListener\("visibilitychange"/)
-  assert.match(library, /未知字段与 extensions 会原样保留/)
+  assert.doesNotMatch(library, /未知字段与 extensions 会原样保留|非常驻 Token 软预算|默认扫描消息数/)
 })
 
 test('资料库读取 RPC 有超时收尾，不会永久停留在加载状态', () => {
@@ -1067,9 +1080,9 @@ test('游戏准备预热与正式启动不再操纵通知连接槽', () => {
   assert.match(sidebar, /return call\("startChat"/)
   assert.doesNotMatch(sidebar, /withConnectionSlot/)
   assert.match(sidebar, /tavernSessionTransition\.begin\(\{ projection: transitionOpening && transitionOpening\.projection/)
-  assert.match(sidebar, /busy && selectedOpening[\s\S]*renderTavernProjection\(selectedOpening\.projection/)
-  assert.match(sidebar, /busy \? h\("div", \{ className: "dsh-tavern-session-switching", role: "status" \}, "正在完成游戏初始化…"\)/)
-  assert.match(assistantRenderer, /renderTavernProjection\(sessionTransitioning\.projection/)
+  assert.doesNotMatch(sidebar, /(?<!!)busy && selectedOpening/)
+  assert.match(sidebar, /busy \? h\("div", \{ className: "dsh-tavern-session-switching", role: "status", "aria-live": "polite" \}, openingPicker\.preparing \? "正在准备开场与脚本资源…" : "正在完成游戏初始化…"/)
+  assert.doesNotMatch(assistantRenderer, /renderTavernProjection\(sessionTransitioning\.projection/)
   assert.match(assistantRenderer, /正在完成游戏初始化/)
   assert.match(serverSource, /case 'preparePlayStart':[\s\S]*await runtimePresets\.prepareFullSnapshot\(\)/)
 })
@@ -1079,10 +1092,10 @@ test('有效的世界书匹配设置在兼容字段之外，兼容字段默认�
   const compatibility = editor.indexOf('h("details", null, h("summary", null, "兼容字段")')
 
   assert.ok(compatibility >= 0)
-  for (const label of ['"二级触发词"', '"启用"', '"使用二级条件"', '"区分大小写"', '"整词匹配"']) {
+  for (const label of ['"二级触发词"', '"启用"', '"使用二级条件"', '"区分大小写"', '"整词匹配"', '"注入位置"', '"包含组"', '"不被递归触发"']) {
     assert.ok(editor.indexOf(label) >= 0 && editor.indexOf(label) < compatibility, label)
   }
-  for (const label of ['"注入位置"', '"深度"', '"概率 %"', '"向量候选"', '"不被递归触发"']) {
+  for (const label of ['"深度"', '"概率 %"', '"向量候选"']) {
     assert.ok(editor.indexOf(label) > compatibility, label)
   }
   assert.doesNotMatch(editor.slice(compatibility, compatibility + 80), /open:/)
@@ -1102,7 +1115,7 @@ test('世界书条目删除位于展开区底部并要求二次确认', () => {
   const editor = between(clientSource, 'function WorldBookEditor', 'function WorldBookLibraryTab')
   const row = between(editor, 'function entryRow', 'return h("div", { className: "dsh-tavern-library" }')
 
-  assert.match(editor, /window\.confirm\(/)
+  assert.match(editor, /await askConfirm\(/)
   assert.match(editor, /"删除世界书条目“" \+ title/)
   assert.match(editor, /保存世界书后才会正式删除/)
   assert.match(row, /className: "dsh-tavern-worldbook-danger-zone"/)
@@ -1133,20 +1146,22 @@ test('人物卡持久状态栏由酒馆状态面板承载，不再覆盖对话�
 	assert.doesNotMatch(clientSource, /dsh-tavern-persistent-status-view/)
 })
 
-test('本局人物设计档案以只读折叠项进入酒馆状态并随实时视图刷新', () => {
+test('本局人物设计由用户手动触发，档案以只读折叠项进入酒馆状态', () => {
 	const statusPanel = between(clientSource, 'function TavernStatusPanel', 'function TavernStatusTab')
-	const view = between(serverSource, 'async function view(chat, card)', 'function replyProjectionsOf')
+	const view = between(serverSource, 'async function view(chat, card,', 'function replyProjectionsOf')
 	assert.match(view, /characterDesigns: projectCharacterDesignDocument\(chat\.characterDesignDocument\)/)
 	assert.match(statusPanel, /"人物设计档案（"/)
 	assert.match(statusPanel, /view\.characterDesigns\.characters\.map/)
 	assert.match(statusPanel, /h\("details", \{ key: character\.name \|\| index, className: "dsh-tavern-character-design" \}/)
-	assert.match(statusPanel, /后台发现重要人物需要补全设计后，档案会自动出现在这里。/)
+	assert.match(statusPanel, /点击“设计人物”，按你的要求创建或补充档案。/)
+	assert.match(statusPanel, /onClick: \(\) => designCharacter\(/)
+	assert.match(statusPanel, /disabled: running \|\| view\.activity\?\.busy \|\| view\.characterDesignTask\?\.status === "running"/)
 	assert.doesNotMatch(statusPanel, /deleteCharacterDesign|saveCharacterDesign|编辑人物设计/)
 })
 
 test('酒馆状态只服务游玩模式，卡片工作台面板暂不复用该侧栏', () => {
   const status = between(clientSource, 'function TavernStatusPanel', 'function TavernStatusTab')
-  const view = between(serverSource, 'async function view(chat, card)', 'function replyProjectionsOf')
+  const view = between(serverSource, 'async function view(chat, card,', 'function replyProjectionsOf')
   assert.match(status, /if \(view\.mode === "card"\) return null;/)
   assert.match(view, /worldBookError: chat\.worldBookError \|\| null/)
   assert.match(status, /世界书召回失败：/)
@@ -1196,7 +1211,7 @@ test('人物卡 iframe 不因等价上下文或切换会话而重复启动', () 
 	assert.match(renderer, /tavernSessionTransition\.subscribe/)
 	assert.match(renderer, /latestProjectionTurn/)
 	assert.match(renderer, /eagerFrame: storyTurn > 0 && storyTurn === latestProjectionTurn/)
-	assert.match(renderer, /sessionTransitioning\.projection/)
+	assert.doesNotMatch(renderer, /sessionTransitioning\.projection/)
 	assert.match(renderer, /正在完成游戏初始化/)
 	assert.match(sidebar, /tavernSessionTransition\.begin\(\{ projection:/)
 	assert.match(sidebar, /setOpeningPicker\(null\)/)
@@ -1204,15 +1219,17 @@ test('人物卡 iframe 不因等价上下文或切换会话而重复启动', () 
 	assert.match(capture, /touchUpdatedAt: false/)
 })
 
-test('剧本预览只显示当前召回和后续块', () => {
-  assert.match(clientSource, /index === 0 \? "当前召回" : "后续"/)
-  assert.doesNotMatch(clientSource, /上一块（已召回）|当前待召回|scriptPreview\.previous/)
+test('剧本状态栏接入独立的块浏览与手动游标组件', () => {
+  const panel = between(clientSource, 'function TavernStatusPanel', 'function TavernCardAppDock')
+  assert.match(panel, /h\(ScriptNavigation, \{/)
+  assert.match(panel, /cursor: view\.scriptProgress\.cursor/)
+  assert.doesNotMatch(panel, /scriptPreview\.upcoming/)
 })
 
 test('实验分支开放兼容入口并保留普通游玩与资源能力', () => {
 	const player = between(clientSource, 'function TavernPlayerNameAction', 'function TavernStatusPanel')
 	const shell = between(clientSource, 'function TavernSidebar', 'function register(input)')
-	const action = between(clientSource, 'function CandidateAction', 'function CandidateDockActions')
+	const action = between(clientSource, 'function CandidateAction', 'function TavernRollbackAction')
 	const coordination = between(clientSource, 'function coordinationView', 'function createTavernCoordinationEventModule')
 	const preStep = between(serverSource, "ctx.on('agent/pre-step'", "ctx.on('llm/stream'")
 	const llmStream = between(serverSource, "ctx.on('llm/stream'", "ctx.on('agent/turn-stopping'")
@@ -1239,10 +1256,10 @@ test('实验分支开放兼容入口并保留普通游玩与资源能力', () =>
 	assert.match(coordination, /requestMode: sync\.requestMode === "sillytavern"/)
 	assert.match(action, /"重新生成候选项"[\s\S]*"重新生成正文"/)
 	assert.doesNotMatch(action, /requestMode === "sillytavern"\) return/)
-	assert.match(action, /rollbackViewState = useLiveTavernView\(props\.sessionId,[\s\S]*canRollback = rollbackViewState\.view && rollbackViewState\.view\.canRollback === true/)
+	assert.match(action, /rollbackViewState = useLiveTavernView\(props\.sessionId,[\s\S]*canRollback = rollbackViewState\.view && \(rollbackViewState\.view\.canRegenerate \?\? rollbackViewState\.view\.canRollback\) === true/)
 	assert.match(clientSource, /function TavernMoreActions[\s\S]*React\.createElement\(TavernRollbackAction, props\)[\s\S]*React\.createElement\(TavernCompactionAction,/)
 	assert.match(action, /liveTavernView\.invalidate\(props\.sessionId\)[\s\S]*tavernCoordination\.invalidate\(props\.sessionId\)/)
-	assert.match(serverSource, /canRollback: hasRollbackMessages\(chat\.messages\)/)
+	assert.match(serverSource, /canRollback: rollbackState\.canRollback/)
 	assert.doesNotMatch(player, /setRequestMode|请求：酒馆兼容/)
 	assert.doesNotMatch(clientSource, /"请求模式".*"select"/s)
 	assert.doesNotMatch(serverSource, /resolveDeveloperMode|DSH_TAVERN_DEV_MODE|仅在开发模式下可用/)
@@ -1304,7 +1321,7 @@ test('普通游玩投影对话预设快照，兼容模式继续按 SillyTavern �
 	assert.match(compile, /const snapshot = await resolveChatRuntimePreset\(chat\)/)
 	assert.match(compile, /presetPath === '' \? createCleanCompatibilityPreset\(\) : snapshot\.compatibilityPreset/)
 	assert.match(compile, /presetPath === '' \? \{\} : snapshot\.compatibilityPresetDocument/)
-	assert.match(compile, /Array\.isArray\(snapshot && snapshot\.regexScripts\) \? snapshot\.regexScripts : \[\]/)
+	assert.match(compile, /composeTavernRegexScripts\(extensions, snapshot\?\.regexScripts\)/)
 	assert.doesNotMatch(compile, /bypassPlans/)
 	assert.match(serverSource, /return chat\.runtimePresetSnapshot && typeof chat\.runtimePresetSnapshot === 'object'/)
 	assert.match(turnOrchestrationSource, /presetMiddleInstructions\(snapshot\)/)

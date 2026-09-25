@@ -17,11 +17,15 @@ function fakeDownload(platform, calls) {
   return (command, args) => {
     calls.push([command, args])
     assert.equal(command, 'npm')
-    assert.equal(args.at(-1), `@deepseek-ai/dsh@${adaptedDshVersion}`)
+    assert.equal(args[0], 'ci')
+    assert.ok(!args.includes('--global'))
     const prefix = args[args.indexOf('--prefix') + 1]
-    put(path.join(prefix, platform === 'win32' ? 'node_modules/@deepseek-ai/dsh/package.json' : 'lib/node_modules/@deepseek-ai/dsh/package.json'), JSON.stringify({ version: adaptedDshVersion, bin: { dsh: "bin.cjs" } }))
-    put(cliRuntimeCommand(prefix, platform), 'private')
-    put(path.join(prefix, platform === 'win32' ? 'node_modules/@deepseek-ai/dsh/bin.cjs' : 'lib/node_modules/@deepseek-ai/dsh/bin.cjs'), `console.log(${JSON.stringify(adaptedDshVersion)})`)
+    const manifest = JSON.parse(readFileSync(path.join(prefix, 'package.json')))
+    const lock = JSON.parse(readFileSync(path.join(prefix, 'package-lock.json')))
+    assert.equal(manifest.dependencies['@deepseek-ai/dsh'], adaptedDshVersion)
+    assert.equal(lock.packages['node_modules/@deepseek-ai/dsh'].version, adaptedDshVersion)
+    put(path.join(prefix, 'node_modules/@deepseek-ai/dsh/package.json'), JSON.stringify({ version: adaptedDshVersion, bin: { dsh: "bin.cjs" } }))
+    put(path.join(prefix, 'node_modules/@deepseek-ai/dsh/bin.cjs'), `console.log(${JSON.stringify(adaptedDshVersion)})`)
   }
 }
 
@@ -30,7 +34,7 @@ for (const platform of ['linux', 'win32']) {
     const root = path.join(temporary(t), 'runtime'), calls = []
     put(path.join(root, 'old-only.txt'), 'old')
     let tx = installCliRuntime({ root, platform, run: fakeDownload(platform, calls) })
-    assert.equal(readFileSync(tx.command, 'utf8'), 'private')
+    assert.ok(existsSync(tx.command))
     assert.equal(existsSync(path.join(root, 'old-only.txt')), false)
     tx.rollback()
     assert.equal(readFileSync(path.join(root, 'old-only.txt'), 'utf8'), 'old')
@@ -104,4 +108,18 @@ test('CLI ignores global PATH, rejects missing private runtime, and retains expl
   const command = cliRuntimeCommand(path.join(privateHome, 'runtime'))
   put(command)
   assert.deepEqual(JSON.parse(probe().stdout), { command, home: privateHome })
+})
+
+test('runtime lock pins the complete DSH release with portable integrity-checked downloads', () => {
+  const lock = JSON.parse(readFileSync(new URL('../config/cli-runtime/package-lock.json', import.meta.url)))
+  const manifest = JSON.parse(readFileSync(new URL('../config/cli-runtime/package.json', import.meta.url)))
+  assert.deepEqual(lock.packages[''].dependencies, manifest.dependencies)
+  for (const [location, pkg] of Object.entries(lock.packages)) {
+    if (!location) continue
+    assert.match(location, /^node_modules\//)
+    assert.equal(pkg.link, undefined)
+    assert.match(pkg.resolved, /^https:\/\/registry\.npmjs\.org\//)
+    assert.match(pkg.integrity, /^sha512-/)
+    if (/node_modules\/@deepseek-ai\/dsh(?:-[^/]+)?$/.test(location)) assert.equal(pkg.version, adaptedDshVersion, location)
+  }
 })

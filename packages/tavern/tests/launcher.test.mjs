@@ -102,7 +102,7 @@ test('升级时只用本次启动标识引导一次新页面，之后交给页�
   assert.equal(needsFrontendBootstrap({ version: 2 }), false)
   assert.match(serviceSource, /const target = restartBrowserTarget\(state\.port, state\.runtimeGeneration, state\.webUrl\)/)
   assert.match(serviceSource, /openBrowserTarget\(target\)/)
-  assert.match(launcherSource, /if \(!bootstrapFrontendOnce\(state\)\)/)
+  assert.match(launcherSource, /if \(!await bootstrapFrontendOnce\(state\)\)/)
   assert.doesNotMatch(launcherSource, /Shift \+ R 强制刷新/)
   assert.deepEqual(browserOpenCommand('http://127.0.0.1:3081/?tavern-boot=x', 'darwin'), {
     command: 'open',
@@ -223,7 +223,7 @@ test('更新器成功执行并清理临时脚本后写入 completed 终态', asy
   }
 })
 
-test('代码已覆盖但自动重启失败时不再误报整体更新失败', async () => {
+test('代码已覆盖但安装器失败时仍保留失败状态', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-tavern-update-partial-'))
   try {
     const statusFile = path.join(root, 'update-status.json')
@@ -232,11 +232,11 @@ test('代码已覆盖但自动重启失败时不再误报整体更新失败', as
     const installerSource = process.platform === 'win32' ? 'exit 1\r\n' : '#!/bin/sh\nexit 1\n'
     await writeFile(path.join(root, installerName), installerSource)
     await writeFile(path.join(root, '.dsh-tavern-release.json'), JSON.stringify({ commit }))
-    await updateApplication({ host: 'cli', statusFile, delay: 0, sourceRoot: root, targetCommit: commit, log() {} })
+    await assert.rejects(() => updateApplication({ host: 'cli', statusFile, delay: 0, sourceRoot: root, targetCommit: commit, log() {} }), /更新失败/)
     const status = JSON.parse(await readFile(statusFile, 'utf8'))
-    assert.equal(status.phase, 'installed-restart-required')
+    assert.equal(status.phase, 'failed')
     assert.equal(status.targetCommit, commit)
-    assert.match(status.error, /程序文件已更新/)
+    assert.match(status.error, /更新失败/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -398,8 +398,8 @@ test('installers default to codeload archives while allowing an override', () =>
 
 test('安装器优先使用 Git 稀疏缓存，再用 jsDelivr 校验下载和完整 ZIP 回退', () => {
   assert.match(windowsInstaller, /source-cache\\dsh-tavern\.git/)
-  assert.match(windowsInstaller, /clone --bare --filter=blob:none --depth 1/)
-  assert.match(windowsInstaller, /archive --format=zip/)
+  assert.match(windowsInstaller, /'clone', '--bare', '--filter=blob:none', '--depth', '1'/)
+  assert.match(windowsInstaller, /'archive', '--format=zip'/)
   assert.match(windowsInstaller, /jsDelivr 备用源下载运行代码/)
   assert.match(windowsInstaller, /SHA256/)
   assert.match(windowsInstaller, /正在下载完整 ZIP/)

@@ -77,6 +77,7 @@ function nativeEntry(entry) {
     material: entry.type === 'material' ? entry.material : null,
     source: {
       identifier: entry.identifier,
+      sourcePromptIndex: entry.sourceIndex,
       marker: entry.marker,
       injectionPosition: entry.injectionPosition,
       injectionDepth: entry.injectionDepth,
@@ -138,7 +139,7 @@ export function previewPresetConversion(text, filename = '', options = {}) {
       role: roleOf(prompt.role),
       content,
       marker: prompt.marker === true,
-      sourceIndex,
+      sourceIndex: object.prompts.indexOf(prompt),
       injectionPosition: numberOrNull(prompt.injection_position),
       injectionDepth: numberOrNull(prompt.injection_depth),
       injectionOrder: numberOrNull(prompt.injection_order),
@@ -174,7 +175,7 @@ export function previewPresetConversion(text, filename = '', options = {}) {
   }
 
   const selectedItems = selectedGroup === undefined
-    ? records.map(function (record) { return { identifier: record.identifier, enabled: promptDefinitions[record.sourceIndex].enabled !== false } })
+    ? records.map(function (record) { return { identifier: record.identifier, enabled: object.prompts[record.sourceIndex].enabled !== false } })
     : selectedGroup.order
   const used = new Set()
   const sourceRows = []
@@ -264,6 +265,25 @@ export function previewPresetConversion(text, filename = '', options = {}) {
     })
     if (record.marker && MATERIAL_MARKERS[record.identifier] !== undefined) nativeMaterials.push(row)
     else unordered.push(row)
+  }
+
+  // Explicit Tavern ordering overrides only placement; original ST fields remain intact.
+  const layout = object.dsh_tavern?.promptLayout
+  if (layout && typeof layout === 'object') {
+    const candidates = [...phases.front, ...phases.middle, ...phases.back]
+    const moved = new Set()
+    const arranged = { front: [], middle: [], back: [] }
+    for (const phase of ['front', 'middle', 'back']) {
+      for (const item of Array.isArray(layout[phase]) ? layout[phase] : []) {
+        const row = candidates.find(row => row.sourceIndex === item?.sourceIndex && row.identifier === item?.identifier)
+        if (!row || moved.has(row)) continue
+        moved.add(row); row.targetPhase = phase; arranged[phase].push(row)
+      }
+    }
+    for (const phase of ['front', 'middle', 'back']) {
+      arranged[phase].push(...phases[phase].filter(row => !moved.has(row)))
+      phases[phase] = arranged[phase]
+    }
   }
 
   const diagnostics = []

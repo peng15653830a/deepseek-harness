@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readdir, stat } from 'node:fs/promises'
+import { readdir, stat, utimes } from 'node:fs/promises'
 import path from 'node:path'
 import { createDurableFilePromotion } from '../durable-file-promotion.js'
 
@@ -54,7 +54,11 @@ export function createResourceMutationJournal(options = {}) {
       const target = path.join(dataRoot, entry.path)
       const value = decoded(entry[side])
       if (value === null) await files.remove(target)
-      else await files.write(target, value)
+      else {
+        await files.write(target, value)
+        const times = entry[side + 'Times']
+        if (times) await utimes(target, times.atimeMs / 1000, times.mtimeMs / 1000)
+      }
       index += 1
       await fault({ journal, side, index, target })
     }
@@ -82,13 +86,15 @@ export function createResourceMutationJournal(options = {}) {
       const key = path.resolve(target)
       if (!desired.has(key)) {
         const current = await files.read(key)
-        desired.set(key, { before: current, after: current })
+        const info = current === undefined ? null : await stat(key)
+        const beforeTimes = info ? { atimeMs: info.atimeMs, mtimeMs: info.mtimeMs } : null
+        desired.set(key, { before: current, after: current, beforeTimes, afterTimes: null })
       }
       return desired.get(key)
     }
 
     const plan = Object.freeze({
-      async write(target, value) { (await remember(target)).after = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8') },
+      async write(target, value) { const state = await remember(target); state.after = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8'); state.afterTimes = null },
       async remove(target) {
         const paths = await filePaths(path.resolve(target))
         if (paths.length === 0) { const current = await remember(target); current.after = null; return }
@@ -108,8 +114,10 @@ export function createResourceMutationJournal(options = {}) {
           const destinationFile = suffix === '' ? to : path.join(to, suffix)
           const destinationState = await remember(destinationFile)
           if (destinationState.before !== undefined) throw new Error('资源 mutation 目标已存在：' + path.relative(dataRoot, destinationFile))
-          destinationState.after = await files.read(sourceFile)
-          ;(await remember(sourceFile)).after = null
+          const sourceState = await remember(sourceFile)
+          destinationState.after = sourceState.before
+          destinationState.afterTimes = sourceState.beforeTimes
+          sourceState.after = null
         }
       }
     })
@@ -120,7 +128,7 @@ export function createResourceMutationJournal(options = {}) {
       const before = state.before === undefined ? null : state.before
       const after = state.after === undefined ? null : state.after
       if (Buffer.compare(before || Buffer.alloc(0), after || Buffer.alloc(0)) === 0 && (before === null) === (after === null)) continue
-      entries.push({ path: relative(target), before: encoded(before), after: encoded(after) })
+      entries.push({ path: relative(target), before: encoded(before), after: encoded(after), beforeTimes: state.beforeTimes, afterTimes: state.afterTimes })
     }
     if (entries.length === 0) return { changed: false }
     const journal = { schemaVersion: 1, id: randomUUID(), label: String(label || 'resource-mutation'), mode: 'commit', entries }

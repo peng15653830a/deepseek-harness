@@ -1,3 +1,8 @@
+import { worldbookSnapshot } from './domain/worldbook-snapshot.js'
+import { projectCandidateScriptContext } from './domain/candidate-script-context.js'
+import { projectWorldbookFilterContext } from './domain/worldbook-filter-context.js'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import { prependSystemInstruction } from './domain/system-append.js'
 import { rewindBackgroundSurface } from './domain/background-surface.js'
 import { sessionEvents } from './domain/session-events.js'
 import { randomUUID } from 'node:crypto'
@@ -35,7 +40,7 @@ function backgroundPrompt(messages, turnContext, task, taskProtocol, input = {})
       : (message && message.role === 'assistant' ? '正文' : '用户')
     return '[' + role + ']\n' + messageText(message)
   }).filter(function (text) { return text.trim() !== '' }).join('\n\n')
-  const taskName = task === 'image' ? '场景生图' : task === 'settlement' ? '状态结算' : task === 'phone' ? '手机私聊' : '候选生成'
+  const taskName = task === 'worldbook-filter' ? '世界书筛选' : task === 'image' ? '场景生图' : task === 'settlement' ? '状态结算' : task === 'phone' ? '手机私聊' : task === 'character-design' ? '人物设计' : '候选生成'
   sections.push('【最近剧情与本次任务】\n任务类型：' + taskName + '\n' + recent)
   const protocol = str(taskProtocol).trim()
   if (protocol !== '') sections.push('【DSH 后台任务协议（最终指令）】\n' + protocol)
@@ -119,11 +124,13 @@ export function createBackgroundAgentTask(options) {
   function setupFor(state, descriptor, appendDescriptor) {
     const backgroundPersona = state.input.task === 'phone'
       ? '你是与故事正文隔离的手机私聊 Agent。你只代表指定联系人回复当前手机消息，不推进正文、不修改状态，也不把私聊虚构成已经发生的现场剧情。'
-      : '你是与前台正文生成隔离的酒馆后台 Agent。你会在同一个剧情分支中依次承担状态结算与候选生成，并可在任务确有需要时加载人物设计 Skill；严格按每轮末尾追加的任务协议输出，不得把某类任务的输出格式混入另一类任务。最新权威状态优先于 Session 中的旧动态状态。'
+      : '你是与前台正文生成隔离的酒馆后台 Agent。你会在同一个剧情分支中依次承担状态结算与候选生成，人物设计仅在用户明确发起人物设计任务时执行；严格按每轮末尾追加的任务协议输出，不得把某类任务的输出格式混入另一类任务。最新权威状态优先于 Session 中的旧动态状态。'
     let descriptorAppended = !appendDescriptor
     return async function (childCtx) {
       if (setupAgent !== null) await setupAgent(childCtx)
       state.ctx = childCtx
+      state.modelSelection = { current: { ...state.input.selection }, assembled: undefined }
+      installModelSelection(childCtx, state.modelSelection)
       childCtx.on('agent/pre-step', async function ({ agent, turn, step }, next) {
         const decision = await next()
         if (!descriptorAppended && decision.kind === 'enter') {
@@ -148,7 +155,14 @@ export function createBackgroundAgentTask(options) {
         name: 'deployment:persona',
         order: 0,
         complete: true,
-        text: state.input.task === 'image' ? readSceneImageSystemInstruction() : backgroundPersona
+        // DSH restores complete sections after the assembly waterfall, so the
+        // additional instruction must be part of this authoritative text.
+        text: () => {
+          const fixed = sessionStablePrefixSections(state.session)
+          const sections = state.currentWorldbook === undefined ? fixed : withCurrentWorldbook(fixed, state.currentWorldbook)
+          const assembly = { sections: [...sections, { name: 'deployment:persona', text: state.input.task === 'image' ? (options.imageSystemPrompt ? options.imageSystemPrompt() : readSceneImageSystemInstruction()) : backgroundPersona }] }
+          return prependSystemInstruction(assembly, options.systemAppend?.()).sections.map(section => section.text).join('\n\n')
+        }
       })
       childCtx.systemPrompt.suppressRuntimeContext()
       if (state.input.task === 'image') {
@@ -161,11 +175,10 @@ export function createBackgroundAgentTask(options) {
           }
         })
       }
-      childCtx.tools.restrict({ allow: state.input.task === 'image' || state.input.task === 'phone' ? [] : ['skill', 'web_search'] })
+      childCtx.tools.restrict({ allow: state.input.task === 'phone' ? [] : state.input.task === 'image' ? ['skill', 'tavern_read_skill_reference'] : ['skill', 'tavern_read_skill_reference', 'web_search'] })
       childCtx.on('system-prompt/assemble', async function (_assembly, _context, next) {
         const assembly = await next()
-        const sections = [...(assembly.sections || []), ...sessionStablePrefixSections(_context?.agent?.session)]
-        assembly.sections = state.currentWorldbook === undefined ? sections : withCurrentWorldbook(sections, state.currentWorldbook)
+        prependSystemInstruction(assembly, options.systemAppend?.())
         if (state.input.task === 'phone') {
           assembly.sections = (assembly.sections || []).filter(function (section) {
             return !section || typeof section.name !== 'string' || !section.name.startsWith('tool:')
@@ -180,11 +193,16 @@ export function createBackgroundAgentTask(options) {
       })
       state.refreshConfiguredTools = function () {
         if (state.input.task === 'image') return
-        const key = JSON.stringify(state.input.backgroundTasksSnapshot || null)
+        const key = JSON.stringify([state.input.task, state.input.backgroundTasksSnapshot || null])
         if (state.configuredToolsKey === key) return
         for (const dispose of state.stableToolDisposers || []) dispose()
         state.configuredToolsKey = key
         state.stableToolDisposers = stableBackgroundTools.filter(function (tool) {
+          const shared = sharedByName.get(tool.name)
+          if (shared && (state.input.task !== 'character-design' || shared.allowDuringCharacterDesign === true)) return state.input.task !== 'worldbook-filter' || shared.allowDuringWorldbookFilter === true
+          if (state.input.task === 'character-design') return tool.name.startsWith('character_design_')
+          if (state.input.task === 'worldbook-filter') return tool.name.startsWith('worldbook_')
+          if (tool.name.startsWith('worldbook_')) return false
           const tasks = state.input.backgroundTasksSnapshot
           if (tool.name === 'ledger_submit') return false // Retired, including legacy task snapshots.
           if (!tasks) return true
@@ -214,7 +232,11 @@ export function createBackgroundAgentTask(options) {
       state.refreshConfiguredTools()
       childCtx.on('agent/request', async function (_payload, next) {
         const input = state.input || {}
-        const request = await next()
+        const inherited = await next()
+        const { maxTokens: _oldLimit, ...request } = inherited
+        if (input.task === 'worldbook-filter' && request.tools) request.tools = request.tools.filter(tool => ['worldbook_candidate_read', 'worldbook_filter_submit'].includes(tool.name) || sharedByName.get(tool.name)?.allowDuringWorldbookFilter === true)
+        const limit = Number.isSafeInteger(input.maxTokens) && input.maxTokens > 0 ? input.maxTokens : maximumBackgroundTokens(input.selection)
+        if (limit !== undefined) request.maxTokens = limit
         const temperature = state.characterDesignStage
           ? state.characterDesignStage.temperature(input.temperature)
           : input.temperature
@@ -248,7 +270,8 @@ export function createBackgroundAgentTask(options) {
     if (stableBackgroundTools.length > 0 && input.task !== 'image') {
       state.activeToolTask = {
         async execute(tool, args, execution) {
-          const shared = sharedByName.get(tool.name)
+          const registeredShared = sharedByName.get(tool.name)
+          const shared = input.task !== 'worldbook-filter' || registeredShared?.allowDuringWorldbookFilter === true ? registeredShared : undefined
           const current = allowed.get(tool.name) || (shared && shared.tool)
           if (current === undefined) {
             return JSON.stringify({
@@ -326,9 +349,10 @@ export function createBackgroundAgentTask(options) {
   }
 
   async function execute({ agent, state, traceSessionId, persistent }, input) {
+    state.session = agent.session
     const runtimeInput = state.input
     try { rewindBackgroundSurface(agent.session, input.rewindTo) }
-    catch (error) { console.warn('dsh-tavern: 后台历史回退未完成，继续当前任务:', str(error?.message || error)) }
+    catch (error) { throw new Error('后台历史回退失败，本次任务已停止，未基于旧上下文继续执行。', { cause: error }) }
     const removeTaskTools = installTaskTools(state, runtimeInput, agent.session)
     const cancel = function () { agent.cancel?.({ kind: 'user' }) }
     input.signal?.addEventListener('abort', cancel, { once: true })
@@ -342,19 +366,34 @@ export function createBackgroundAgentTask(options) {
       }
       {
         const existing = readSessionStablePrefix(agent.session)
-        const background = existing ? existing.text : typeof options.resolveStablePrefix === 'function'
+        const revision = typeof options.resolveStablePrefixRevision === 'function' ? await options.resolveStablePrefixRevision(input) : 0
+        const background = existing && revision <= Number(existing.message.source.cardContextRevision || 0) ? existing.text : typeof options.resolveStablePrefix === 'function'
           ? await options.resolveStablePrefix(input) : input.backgroundContext
-        const prefix = await ensureSessionStablePrefix(agent.session, background, options.stablePrefixStorage)
+        const prefix = await ensureSessionStablePrefix(agent.session, background, options.stablePrefixStorage, revision)
         if (prefix && prefix.event !== existing?.event && typeof options.flushSession === 'function') await options.flushSession(agent.session)
       }
-      state.currentWorldbook = typeof options.resolveCurrentWorldbook === 'function'
+      const worldbook = typeof options.resolveCurrentWorldbook === 'function'
         ? await options.resolveCurrentWorldbook(input) : undefined
+      state.currentWorldbook = worldbook && typeof worldbook === 'object' ? worldbook.prefixContext : worldbook
+      const turnWorldbook = worldbook && typeof worldbook === 'object' ? str(worldbook.foregroundContext).trim() : ''
       const eventStart = sessionEvents(agent.session).length
+      const filterContext = projectWorldbookFilterContext(agent.session, input)
+      const scriptContext = projectCandidateScriptContext(agent.session, input)
+      const foregroundReads = typeof options.resolveForegroundWorldbookReads === 'function'
+        ? await options.resolveForegroundWorldbookReads(input) : ''
+      const snapshot = worldbook && typeof worldbook === 'object'
+        ? worldbookSnapshot(agent.session, turnWorldbook) : null
+      const taskText = [foregroundReads, snapshot?.rendered,
+        backgroundPrompt(filterContext?.messages || input.messages, scriptContext?.turnContext ?? input.turnContext, input.task, input.system, input)].filter(Boolean).join('\n\n')
       agent.followup({
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text: backgroundPrompt(input.messages, input.turnContext, input.task, input.system, input) }],
-        source: { kind: 'plugin', plugin: 'dsh-tavern' }
+        content: [{ type: 'text', text: taskText }],
+        source: { kind: 'plugin', plugin: 'dsh-tavern', ...(snapshot ? { worldbookSnapshot: snapshot } : {}), ...(scriptContext?.body ? {
+          candidateScriptWindow: { version: 1, start: taskText.indexOf(scriptContext.body), length: scriptContext.body.length, digest: scriptContext.digest }
+        } : {}), ...(filterContext ? {
+          worldbookFilterPayload: { version: 1, start: taskText.indexOf(filterContext.payloadText), length: filterContext.payloadText.length }
+        } : {}) }
       })
       await agent.whenIdle()
       input.signal?.throwIfAborted()

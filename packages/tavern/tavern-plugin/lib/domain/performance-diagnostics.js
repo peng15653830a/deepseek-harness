@@ -3,7 +3,19 @@ export function createPerformanceDiagnostics() {
   const methods = new Map()
   const slow = []
   let browser = null
+  let http = null
+  const openings = []
   return {
+    http(snapshot) { http = structuredClone(snapshot) },
+    opening(value) {
+      if (!value || !['resources', 'readCard', 'readExtensions', 'preview', 'prepare'].includes(value.stage)) return
+      const row = { at: Date.now(), stage: value.stage }
+      for (const key of ['durationMs', 'helperCount', 'regexCount', 'skippedCount', 'failedCount', 'cacheHitCount', 'sharedCount', 'cooldownCount']) {
+        if (Number.isFinite(value[key]) && value[key] >= 0) row[key] = Math.min(1e12, Math.round(value[key]))
+      }
+      openings.push(row)
+      if (openings.length > 60) openings.shift()
+    },
     record(method, durationMs) {
       if (!/^[A-Za-z][A-Za-z0-9]{0,79}$/.test(method) || !Number.isFinite(durationMs)) return
       durationMs = Math.max(0, Math.round(durationMs))
@@ -23,11 +35,20 @@ export function createPerformanceDiagnostics() {
       for (const key of ['observedMs', 'longTaskCount', 'longTaskTotalMs', 'longTaskMaxMs', 'slowRpcCount', 'slowRpcMaxMs']) {
         if (Number.isFinite(value[key]) && value[key] >= 0) clean[key] = Math.min(1e12, Math.round(value[key]))
       }
+      if (Array.isArray(value.requests)) clean.requests = value.requests.slice(-60).filter(row => row && /^[a-f0-9-]{36}$/.test(row.id || '') && ['getSession', 'syncSession'].includes(row.method)).map(row => {
+        const result = { id: row.id, method: row.method, failed: row.failed === true }
+        for (const key of ['sentAt', 'active', 'headersMs', 'parsedMs', 'durationMs']) {
+          if (Number.isFinite(row[key]) && row[key] >= 0) result[key] = Math.min(1e12, Math.round(row[key]))
+        }
+        return result
+      })
       if (Object.keys(clean).length) browser = { ...clean, receivedAt: Date.now(), longTaskSupported: value.longTaskSupported === true }
     },
     read() {
       return { version: 1, scope: 'server-process-and-last-reporting-browser', resetsOnRestart: true,
-        slowThresholdMs: 1000, browserLongTaskThresholdMs: 100, browser: browser && { ...browser },
+        ...(http ? { http: structuredClone(http) } : {}),
+        ...(openings.length ? { openings: openings.map(row => ({ ...row })) } : {}),
+        slowThresholdMs: 1000, browserLongTaskThresholdMs: 100, browser: browser && structuredClone(browser),
         methods: [...methods].map(([method, row]) => ({ method, count: row.count, averageMs: Math.round(row.totalMs / row.count), maxMs: row.maxMs, slowCount: row.slowCount })),
         slow: slow.map(row => ({ ...row })) }
     }

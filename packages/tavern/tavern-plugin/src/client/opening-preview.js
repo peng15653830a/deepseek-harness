@@ -70,17 +70,13 @@ function installOpeningPreviewBridge(token, preview) {
       await window.setChatMessages([{ message_id: 0, swipe_id: savedIndex }]);
     }
   });
-  if (original) {
-    window.getTavernHelperVersion = function () { return "4.8.19"; };
-    window.TavernHelper.getTavernHelperVersion = window.getTavernHelperVersion;
-  }
   window.getCurrentMessageId = window.getLastMessageId = function () { return 0; };
   window.getChatMessages = function (id, options) {
     if (original) return original.getChatMessages(id, options);
     if (Number(id) !== 0 || (options && options.role && !['all', 'assistant'].includes(options.role))) return [];
     return [{ message_id: 0, role: 'assistant', message: swipes[selected], swipe_id: selected, swipes: swipes.slice() }];
   };
-  // Some chooser pages await this gate without reading MVU. No game state exists yet.
+  // Standalone choosers without a preparation draft may await this gate without reading MVU.
   window.waitGlobalInitialized = async function (name) {
     if (original) return original.waitGlobalInitialized(name);
     if (name === 'Mvu' && !preview.preparationId) return undefined;
@@ -178,4 +174,31 @@ function installSessionOpeningBridge(token, descriptor) {
     return window.SillyTavern.reloadCurrentChat();
   };
 
+}
+
+// A retained preview still owns its private host draft while hidden. Renew only
+// its expiry without applying the response to the iframe. Older hosts ignore
+// touchOnly and return the draft, so a refreshed client needs no host restart.
+function retainOpeningPreparation(id, options) {
+  const host = options.window;
+  let stopped = false, pending = false, lastError = "";
+  async function renew() {
+    if (stopped || pending) return;
+    pending = true;
+    try {
+      await options.call("getOpeningPreparation", { id: id, touchOnly: true });
+      lastError = "";
+    } catch (error) {
+      const message = String(error && error.message || error);
+      if (!stopped && message !== lastError) { lastError = message; options.onError(error); }
+    } finally { pending = false; }
+  }
+  void renew();
+  const timer = host.setInterval(renew, 60000);
+  host.addEventListener("focus", renew);
+  return function () {
+    stopped = true;
+    host.clearInterval(timer);
+    host.removeEventListener("focus", renew);
+  };
 }

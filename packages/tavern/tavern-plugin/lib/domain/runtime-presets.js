@@ -385,18 +385,17 @@ export function createRuntimePresetModule(options = {}) {
       if (!available.has(activePath)) throw new Error('预设已不存在：' + activePath)
       const preset = await readPreset(activePath)
       if (!preset || preset.valid !== true || preset.recognized !== true) throw new Error('预设无法读取：' + activePath)
-      const phases = new Map()
       const draft = preset.dshPreset && typeof preset.dshPreset === 'object' ? preset.dshPreset : null
-      if (draft) {
-        for (const phase of ['front', 'middle', 'back']) {
-          for (const entry of (Array.isArray(draft[phase]) ? draft[phase] : [])) phases.set(String(entry.id || ''), phase)
-        }
-      }
+      const entries = Array.isArray(preset.entries) ? preset.entries : []
+      const ordered = draft ? ['front', 'middle', 'back'].flatMap(phase =>
+        (draft[phase] || []).map(item => ({ phase, entry: Number.isInteger(item.source?.sourcePromptIndex)
+          ? entries.find(entry => entry.sourcePromptIndex === item.source.sourcePromptIndex)
+          : entries.find(entry => entry.entryKey === item.id) })))
+        : entries.filter(entry => entry.ordered === true).map(entry => ({ entry, phase: Number(entry.injectionPosition) === 1 ? 'middle' : 'front' }))
       const phaseEntries = { front: [], middle: [], back: [] }
       const sources = []
-      for (const entry of (Array.isArray(preset.entries) ? preset.entries : [])) {
-        if (entry.ordered !== true || entry.enabled === false || entry.marker === true || entry.injectable !== true) continue
-        const phase = phases.get(entry.entryKey) || (Number(entry.injectionPosition) === 1 ? 'middle' : 'front')
+      for (const { entry, phase } of ordered) {
+        if (!entry || entry.enabled === false || entry.marker === true || entry.injectable !== true) continue
         const projected = {
           id: entry.entryKey,
           role: entry.role,

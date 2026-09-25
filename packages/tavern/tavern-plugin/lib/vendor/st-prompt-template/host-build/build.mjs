@@ -20,6 +20,7 @@ export async function buildTemplatePlugin({ dependencyRoot, outputPath }) {
     experiments: { outputModule: true },
     resolve: { extensions: ['.ts', '.js'], modules: [resolve(dependencyRoot, 'node_modules'), 'node_modules'] },
     module: { rules: [
+      { resourceQuery: /language-only/, enforce: 'pre', use: resolve(here, 'editor-language-loader.cjs') },
       { test: /\.ts$/, exclude: /node_modules/, use: { loader: require.resolve('babel-loader'), options: { configFile: false, babelrc: false, presets: [require.resolve('@babel/preset-typescript')] } } },
       { test: /\.css$/, use: [require.resolve('style-loader'), require.resolve('css-loader')] }
     ] },
@@ -38,6 +39,11 @@ export async function buildTemplatePlugin({ dependencyRoot, outputPath }) {
     if (stats.hasErrors() || stats.hasWarnings()) return reject(new Error(stats.toString({ all: false, errors: true, warnings: true })))
     accept()
   }))
+  await new Promise((accept, reject) => webpack({
+    mode:'production', target:'webworker', entry:resolve(here,'compiler-worker.js'),
+    resolve:{modules:[resolve(dependencyRoot,'node_modules')]},
+    output:{path:resolve(outputPath),filename:'ejs.workers.js'}, performance:{hints:false}
+  }, (error,stats) => error || stats.hasErrors() ? reject(error || new Error(stats.toString({all:false,errors:true}))) : accept()))
   await writeFile(resolve(outputPath, 'settings.html'), await readFile(resolve(here, '../upstream/settings.html')))
   const files = {}
   for (const name of (await readdir(outputPath)).sort()) {
@@ -46,7 +52,7 @@ export async function buildTemplatePlugin({ dependencyRoot, outputPath }) {
   }
   await writeFile(resolve(outputPath, 'manifest.json'), JSON.stringify({
     upstreamCommit: upstream.commit, version: upstream.version,
-    entry: 'index.js', hostIntegrated: false, files
+    entry: 'index.js', hostIntegrated: true, files
   }, null, 2) + '\n')
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

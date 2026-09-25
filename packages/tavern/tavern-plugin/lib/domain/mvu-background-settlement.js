@@ -319,6 +319,17 @@ export function formatMvuUpdateCommand(value) {
   ].join('\n')
 }
 
+// Helper-created messages belong to the next foreground reply. Bound the handoff
+// by that reply, so retries are stable and later turns cannot replay setup rules.
+export function collectMvuHelperContext(messages, messageId) {
+  if (!Array.isArray(messages) || !Number.isInteger(messageId) || messageId < 0 || messageId >= messages.length) return []
+  let start = messageId - 1
+  while (start >= 0 && messages[start]?.role !== 'assistant') start--
+  return messages.slice(start + 1, messageId)
+    .filter(message => message?.role === 'tavern-helper')
+    .map(message => str(message.text).trim()).filter(Boolean)
+}
+
 export function createMvuBackgroundTaskFrame(input = {}) {
   const currentVariables = clone(object(input.currentVariables))
   const variableSchema = clone(object(input.variableSchema || currentVariables.schema))
@@ -344,6 +355,8 @@ export function createMvuBackgroundTaskFrame(input = {}) {
     taskRules: {
       updateRules: Array.isArray(input.updateRules) ? input.updateRules.map(str).filter(Boolean) : [],
       backgroundTasks: normalizeBackgroundTasks(input.backgroundTasks),
+      helperContext: Array.isArray(input.helperContext) ? input.helperContext.map(str).filter(Boolean) : [],
+      guidance: str(input.guidance).trim(),
       updateOnlyFromStory: true
     },
     outputContract: { tool: MVU_SUBMIT_UPDATE_TOOL_NAME, required: true, singleCommit: true, maxToolCalls: 3 }
@@ -369,16 +382,20 @@ export function projectMvuBackgroundRequest(frame) {
     turnContext: [
       '【当前变量快照】',
       JSON.stringify(promptVariables(state.currentVariables)),
+      ...(rules.helperContext?.length ? ['【本轮人物卡 Helper 交接】',
+        '以下是本轮正文之前人物卡脚本提供的数据与要求。已确认的建角设定和明确的变量初始化要求可用于本轮初始化；其余剧情意图、候选行动仍须以正文已经发生的事实为准。遵守变量只读规则，不重算脚本负责的派生字段。',
+        ...rules.helperContext] : []),
+      ...(rules.guidance ? ['【本次重新结算的指导意见（仅本次有效）】', str(rules.guidance)] : []),
       '【变量结构】',
       JSON.stringify(state.variableSchema || {}),
       ...(updateRules.length === 0 ? [] : ['【人物卡变量更新规则】', updateRules.join('\n\n')]),
       ...(tasks.characterDesign ? ['【人物设计（按需）】',
-      '若本轮出现值得长期保留的重要人物，可先调用 skill 加载 tavern-character-design，再按 Skill 读取或保存人物档案。人物设计独立保存，不属于 MVU operations。'] : [])
+      '若本轮出现值得长期保留的重要人物，可先调用 skill 加载 character-design，再按 Skill 读取或保存人物档案。人物设计独立保存，不属于 MVU operations。'] : [])
     ].join('\n'),
     system: [
       '只根据【正文】中已经确认发生的事实结算变量，不得读取或推断玩家意图。',
       '不得根据旧轮剧情、隐藏思考、候选项或未发生事件更新变量。',
-      ...(tasks.characterDesign ? ['若确实需要人物设计，在当前后台 Agent 内先加载 tavern-character-design 并调用人物档案工具；无需也不得创建另一个 Agent。完成后继续本轮结算。'] : ['本轮人物设计已关闭，不调用人物设计 Skill 或生成档案。']),
+      ...(tasks.characterDesign ? ['若确实需要人物设计，在当前后台 Agent 内先加载 character-design 并调用人物档案工具；无需也不得创建另一个 Agent。完成后继续本轮结算。'] : ['本轮人物设计已关闭，不调用人物设计 Skill 或生成档案。']),
       tasks.posture ? '在同一次回复中同时调用 posture_submit 和 mvu_submit_update，分别提交本轮结束时可见的人物姿势与变量变化；两者互不依赖，无需等待前一个工具返回。不得在回复正文输出 JSON。' : '本轮姿势结算已关闭，直接提交变量，不生成姿势。',
       '本轮必须调用 mvu_submit_update；姿势和变量分别以各自工具返回结果为准，只补交未完成项。',
       '数值不确定时，合理即可，不要求必须精确。'
@@ -398,11 +415,15 @@ export function createMvuSettlementModule(options = {}) {
   }
 
   async function applySubmission(input, frame, submission, diagnosticId) {
+    if (input.onSubmission) await input.onSubmission(clone(submission))
     const applied = await options.runtime.settleMvuUpdate({
+      durable: Boolean(input.onSubmission), signal: input.signal,
       operationId: input.operationId,
       chatId: input.chatId, branchId: input.branchId, basedOnRevision: input.basedOnRevision,
       sessionId: input.sessionId, messageId: input.messageId, swipeId: input.swipeId,
       expectedLifecycleRevision: input.expectedLifecycleRevision, diagnosticId,
+      baselineVariables: input.currentVariables,
+      preserveForeground: input.preserveForeground === true,
       storyText: frame.foregroundOutput.storyText,
       command: formatMvuUpdateCommand(submission),
       validate: ({ before, after }) => auditMvuSettlement(before, after, submission.operations)
@@ -432,12 +453,14 @@ export function createMvuSettlementModule(options = {}) {
     if (outcome.applied.stale === true) {
       return { frame, submission, receipt: { version: 1, status: 'stale', summary: '变量结算目标已经变化，迟到结果未写入。', diagnosticId, changes: [], sideEffects: [], failures: [] } }
     }
-    return {
+    const result = {
       frame, submission, variables: outcome.after, effect: outcome.effect,
       receipt: { version: 1, status: outcome.status, summary: '', diagnosticId,
         runtimeDiagnostics: outcome.applied.diagnostics || [], changes: outcome.changes,
         sideEffects: outcome.sideEffects, failures: outcome.audit.failures }
     }
+    if (input.onPrepared && outcome.audit.failures.length === 0) await input.onPrepared(clone(result))
+    return result
   }
 
   async function settleVariables(input = {}) {
@@ -472,6 +495,9 @@ export function createMvuSettlementModule(options = {}) {
             charName: input.charName,
             macroState: input.macroState
           })
+          if (input.onPrepared && result && ['updated', 'unchanged'].includes(result.receipt?.status)) {
+            await input.onPrepared(clone({ ...result, posture: posture.posture }))
+          }
           return JSON.stringify({ ok: true })
         } catch (error) {
           return JSON.stringify({ ok: false, retryable: true, error: str(error && error.message || error) })
@@ -510,7 +536,7 @@ export function createMvuSettlementModule(options = {}) {
       }
       if (applied.applied.deferred === true) {
         await record('deferred')
-        feedback = { ok: false, retryable: false, deferred: true, error: '本地 MVU 执行器暂时不可用，已保存本次结算，恢复后自动继续。' }
+        feedback = { ok: false, retryable: false, deferred: true, error: '本地 MVU 执行器暂时不可用，已保存任务，连接恢复后自动继续。' }
         result = { variables: clone(input.currentVariables), submission,
           receipt: { version: 1, status: 'pending', summary: '等待本地 MVU 执行器恢复', diagnosticId, changes: [], sideEffects: [], failures: [] } }
         return JSON.stringify(feedback)
@@ -533,6 +559,7 @@ export function createMvuSettlementModule(options = {}) {
         receipt: { version: 1, status, summary: '', diagnosticId,
           runtimeDiagnostics: applied.applied.diagnostics || [], changes, sideEffects, failures: audit.failures }
       }
+      if (input.onPrepared && audit.failures.length === 0) await input.onPrepared(clone({ ...result, posture: posture?.posture }))
       feedback = {
         ok: audit.failures.length === 0,
         retryable: rolledBack && applied.applied.retryable === true && attempt < maxAttempts,
@@ -547,7 +574,7 @@ export function createMvuSettlementModule(options = {}) {
     let run = {}
     try {
       run = await options.model.run({
-        task: 'settlement', persistent: true, persistentSessionId: traceSessionId, rewindTo: -1,
+        task: 'settlement', backgroundTasks: tasks, persistent: true, persistentSessionId: traceSessionId, rewindTo: -1,
         onPersistentSessionReady: input.onPersistentSessionReady,
         selection: input.selection, messages: request.messages, turnContext: request.turnContext,
         system: [str(input.system).trim(), request.system].filter(Boolean).join('\n\n'),

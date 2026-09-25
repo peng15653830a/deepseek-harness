@@ -37,11 +37,11 @@ test('人物档案先索引、后完整读取，并在同名保存时更新而�
   const index = JSON.parse(await session.execute({ name: CHARACTER_DESIGN_READ_TOOL_NAME, arguments: {} }))
   assert.deepEqual(index.characters, [{
     name: '鹿野栞', identity: completeDesign.identity,
-    narrativeRole: completeDesign.narrativeRole, updatedAt: 100
+    narrativeRole: completeDesign.narrativeRole + '\n\n' + completeDesign.plotPotential, updatedAt: 100
   }])
   const full = JSON.parse(await session.execute({ name: CHARACTER_DESIGN_READ_TOOL_NAME, arguments: { name: '鹿野栞' } }))
-  assert.equal(full.character.design.behaviorStyle, completeDesign.behaviorStyle)
-  assert.equal(full.character.design.defaultPresentation, completeDesign.defaultPresentation)
+  assert.equal(full.character.design.behaviorStyle, undefined)
+  assert.equal(full.character.design.appearance, completeDesign.appearance + '\n\n' + completeDesign.defaultPresentation)
   assert.equal(Object.hasOwn(full.character, 'mvuCoverage'), false)
   assert.equal(Object.hasOwn(full.character, 'mvuProjection'), false)
 
@@ -100,7 +100,7 @@ test('人物档案模块提供不泄漏存储结构的只读状态面板投影',
   assert.equal(view.characters[0].identity, completeDesign.identity)
   assert.deepEqual(view.characters[0].aliases, ['阿栞'])
   assert.deepEqual(view.characters[0].sections.map(section => section.label), [
-    '身份', '剧情作用', '核心动机', '内在矛盾', '性格', '外貌', '行为方式', '说话方式', '人物关系', '默认形象', '剧情潜力'
+    '身份', '性格', '外貌', '说话方式', '剧情作用'
   ])
   assert.equal(Object.hasOwn(view.characters[0], 'design'), false)
   assert.equal(Object.hasOwn(view.characters[0], 'internal'), false)
@@ -154,4 +154,13 @@ test('当前后台 Agent 保存人物后立即独立落盘，无需人物设计�
 
   const read = JSON.parse(await tools.execute('chat-1', { name: CHARACTER_DESIGN_READ_TOOL_NAME, arguments: { name: '鹿野栞' } }))
   assert.equal(read.character.design.identity, completeDesign.identity)
+})
+
+test('新档案只需五项，已删除字段不再输出', async () => {
+  const session = createCharacterDesignDocumentSession()
+  const keys = ['identity', 'narrativeRole', 'personality', 'appearance', 'speechStyle']
+  const args = { name: '新人物', ...Object.fromEntries(keys.map(key => [key, completeDesign[key]])) }
+  assert.equal(JSON.parse(await session.execute({ name: CHARACTER_DESIGN_SAVE_TOOL_NAME, arguments: args })).ok, true)
+  const result = JSON.parse(await session.execute({ name: CHARACTER_DESIGN_READ_TOOL_NAME, arguments: { name: '新人物' } }))
+  assert.deepEqual(Object.keys(result.character.design).sort(), keys.sort())
 })

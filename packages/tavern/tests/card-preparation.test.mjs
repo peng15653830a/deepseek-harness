@@ -412,3 +412,18 @@ test('迁移旧去重投影时仍保留原卡开场槽位', () => {
   const migrated = cards.migrate({ working: { name: '旧开场卡', alternate_greetings: ['海边', '山间'] }, payload: { kind: 'text', text: JSON.stringify(original) } })
   assert.deepEqual(cards.project(migrated).alternate_greetings, original.alternate_greetings)
 })
+
+for (const spec of ['flat', 'chara_card_v2', 'chara_card_v3']) test('变量编辑不触发名字同步，原生与字段改名仍触发：' + spec, () => {
+  const cards = moduleUnderTest()
+  const data = { name: '原名', extensions: { tavern_helper: { variables: {} } } }
+  const workspace = cards.create({ kind: 'import', payload: spec === 'flat' ? data : { spec, data } })
+  const prefix = spec === 'flat' ? '' : '/data'
+  const variables = cards.update({ kind: 'card', card: workspace, patch: {}, rawOperations: [{ op: 'set', path: prefix + '/extensions/tavern_helper/variables', value: { hp: 7 } }] })
+  assert.equal(variables.changed, true)
+  assert.equal(variables.nameChanged, false)
+  const named = cards.update({ kind: 'card', card: workspace, patch: { name: '新名字' } })
+  assert.equal(named.nameChanged, true)
+  const rawNamed = cards.update({ kind: 'card', card: workspace, patch: {}, rawOperations: [{ op: 'set', path: prefix + '/name', value: '原生改名' }] })
+  assert.equal(rawNamed.nameChanged, true)
+  assert.equal(cards.update({ kind: 'card', card: workspace, patch: { name: '原名' } }).nameChanged, false)
+})

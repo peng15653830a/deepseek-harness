@@ -19,7 +19,7 @@ const tavernPresetSource = await readFile(new URL('../presets/tavern/agent.cordi
 const backgroundPresetSource = await readFile(new URL('../presets/tavern-background/agent.cordis.yml', import.meta.url), 'utf8').catch(() => '')
 const profileSource = await readFile(new URL('../package.json', import.meta.url), 'utf8')
 const profilePatchSource = await readFile(new URL('../tavern-plugin/cordis.patch.yml', import.meta.url), 'utf8')
-const advancedSkillSource = await readFile(new URL('../presets/tavern/skills/tavern-advanced-capabilities/SKILL.md', import.meta.url), 'utf8')
+const advancedSkillSource = await readFile(new URL('../presets/tavern/skills/advanced-capabilities/SKILL.md', import.meta.url), 'utf8')
 
 function between(source, start, end) {
   const from = source.indexOf(start)
@@ -87,7 +87,7 @@ test('原版恢复工具只操作当前人物卡并要求固定确认文本', ()
   assert.match(serverSource, /turnOrchestrator\.discard/)
 })
 
-test('卡片 Agent 以极简模式工具为底座，游玩 Agent 不暴露文件或 Skill 工具', () => {
+test('卡片 Agent 以极简模式工具为底座，游玩 Agent 保留 Skill 但不暴露文件编辑工具', () => {
   assert.match(profileSource, /"@deepseek-ai\/dsh-base"/)
   assert.doesNotMatch(tavernPresetSource, /dsh-tool-bash-persistent|dsh-tool-pwsh-persistent|dsh-terminal-bash|timeoutMs: 300000/)
   assert.doesNotMatch(tavernPresetSource, /id: (?:bash|pwsh)-sandbox/)
@@ -97,8 +97,8 @@ test('卡片 Agent 以极简模式工具为底座，游玩 Agent 不暴露文件
   assert.match(profilePatchSource, /id: tool-pwsh[\s\S]*?disabled: !!js process\.platform !== 'win32'/)
   assert.match(profilePatchSource, /id: tool-fs[\s\S]*?disabled: false/)
   assert.match(tavernPresetSource, /@deepseek-ai\/dsh-tool-str-replace-editor/)
-  assert.match(tavernPresetSource, /@deepseek-ai\/dsh-skill-filesystem/)
-  assert.match(tavernPresetSource, /includeDefaultRoots: false/)
+  assert.match(serverSource, /FileSystemSkillProvider/)
+  assert.match(serverSource, /includeDefaultRoots: false/)
   assert.match(tavernPresetSource, /@deepseek-ai\/dsh-tool-skill/)
   assert.match(tavernPresetSource, /@deepseek-ai\/dsh-tool-cordis/)
   assert.match(tavernPresetSource, /text: ''/)
@@ -110,10 +110,11 @@ test('卡片 Agent 以极简模式工具为底座，游玩 Agent 不暴露文件
   assert.match(orchestrationStrategiesSource, /name: 'tavern:resource-workspace'/)
   assert.match(advancedSkillSource, /Cordis 动态插件/)
   assert.match(advancedSkillSource, /tools\.cordis\.yml/)
-  assert.match(orchestratorSource, /if \(mode === 'card'\) return \['web_search', shellToolName, \.\.\.dshFileToolNames, 'skill', 'tavern_save_skill', \.\.\.cordisToolNames, 'tavern_user_profile_read', 'tavern_user_profile_save_draft', 'tavern_user_profile_confirm', 'tavern_read_card'/)
+  assert.match(orchestratorSource, /if \(mode === 'card'\) return \['web_search', shellToolName, \.\.\.dshFileToolNames, 'skill', 'tavern_read_skill_reference', 'tavern_save_skill', \.\.\.cordisToolNames, 'tavern_user_profile_read', 'tavern_user_profile_save', 'tavern_read_card'/)
   assert.doesNotMatch(orchestratorSource, /mode === 'revision'|mode === 'extract'/)
   assert.doesNotMatch(orchestratorSource, /if \(mode === 'script'\) return \[[^\]]*'bash'/)
-	assert.match(serverSource, /controlledToolNames = new Set\(\['bash', 'pwsh', \.\.\.dshFileToolNames, 'skill', 'web_search', 'tavern_save_skill', \.\.\.cordisToolNames, 'tavern_user_profile_read'/)
+	assert.match(serverSource, /controlledToolNames = new Set\(\['bash', 'pwsh', \.\.\.dshFileToolNames, 'skill', 'tavern_read_skill_reference', 'web_search', 'tavern_save_skill', \.\.\.cordisToolNames, 'tavern_user_profile_read'/)
+	assert.match(serverSource, /controlledToolNames = new Set\([^\n]*'tavern_test_response'/)
   assert.match(serverSource, /name: 'tavern_save_skill'/)
   assert.doesNotMatch(serverSource, /name: 'tavern_bind_script'/)
 })
@@ -138,10 +139,10 @@ test('后台压缩在 Agent 作用域挂载 DSH compaction，不阻塞 Tavern Ho
 })
 
 test('后台最小预设提供原生 Skill 目录与按需加载工具', () => {
-  assert.match(backgroundPresetSource, /@deepseek-ai\/dsh-skill-filesystem/)
-  assert.match(backgroundPresetSource, /includeDefaultRoots: false/)
+  assert.match(serverSource, /FileSystemSkillProvider/)
+  assert.match(serverSource, /includeDefaultRoots: false/)
   assert.doesNotMatch(backgroundPresetSource, /customSkillDirs/)
-  assert.match(backgroundPresetSource, /new URL\('skills\/', baseUrl\)/)
+  assert.match(serverSource, /presets\/tavern-background\/skills/)
   assert.match(backgroundPresetSource, /@deepseek-ai\/dsh-tool-skill/)
   assert.match(backgroundSessionsSource, /dsh-tavern-background-tools-v4/)
   assert.match(backgroundSessionsSource, /STALE_BACKGROUND_PROVIDERS\.has\(savedDescriptor\.provider\)/)
@@ -180,7 +181,7 @@ test('姿势结算通过短工具参数提交', () => {
   assert.match(systemPrompt, /位置、姿势、动作/)
   assert.doesNotMatch(flow, /maxTokens:/)
   assert.match(flow, /backgroundTasksSettings\.posture \? \[POSTURE_SUBMIT_TOOL\]/)
-  assert.match(flow, /skill 加载 tavern-character-design/)
+  assert.match(flow, /skill 加载 character-design/)
   assert.match(flow, /characterDesignDocuments\.execute/)
   assert.match(flow, /normalizePostureSubmission/)
   assert.match(flow, /未调用 posture_submit/)
@@ -224,7 +225,7 @@ test('外部预设作用于前台游玩，后台与卡片 Agent 保持 DSH 原�
   assert.match(backgroundSetup, /resolveRuntimePresetSnapshot: async function \(input\) \{[\s\S]*return null/)
   assert.doesNotMatch(backgroundSetup, /resolveChatRuntimePreset/)
   const lifecycle = between(serverSource, '// ---------- DSH 回合生命周期 ----------', '// ---------- 模型可选工具 ----------')
-  assert.match(orchestrationStrategiesSource, /const snapshot = mode === 'story' \|\| mode === 'script' \? await options\.resolvePreset\(input\.chat\) : null/)
+  assert.match(orchestrationStrategiesSource, /const rawSnapshot = mode === 'story' \|\| mode === 'script' \? await options\.resolvePreset\(input\.chat\) : null/)
   assert.match(orchestrationStrategiesSource, /scope: 'foreground'/)
   assert.match(serverSource, /foregroundFrameSessionAdapter\.append\(input\)/)
   const compatibility = between(serverSource, 'async function compileCompatibilityTurn', '// ---------- DSH 回合生命周期 ----------')
@@ -329,7 +330,7 @@ test('游玩回复把 prompt 投影写回 DSH Session，同时保留完整展示
   assert.match(serverSource, /projectReply: projectRuntimeReply/)
   assert.match(lifecycle, /if \(saved\.reply\) replaceAssistantReply\(session, assistant, saved\.reply\.sessionText\)/)
   assert.doesNotMatch(lifecycle, /presentationHtml|\\u00a0/)
-  assert.match(replaceReply, /surfaceOp: \{ op: 'replace', startSeq: result\.index, end: result\.index \}/)
+  assert.match(replaceReply, /replaceSessionSurface\(session, 'assistant\/message'/)
 })
 
 test('新会话取得可写 Session 后通过 Conversation Registry 原子发布', () => {

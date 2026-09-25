@@ -39,7 +39,7 @@ test('image Agent reads historical character designs and submits text and tags w
     assert.ok(input.tools.some(tool => tool.name === 'character_design_read'))
     assert.ok(!input.tools.some(tool => tool.name === 'character_design_save'))
     const read = JSON.parse(await input.onToolCall({ name: 'character_design_read', arguments: { name: '林岚' } }))
-    assert.equal(read.character.design.appearance, '黑色短发')
+    assert.equal(read.character.design.appearance, '黑色短发\n\n白色外套')
     const field = (text, tags) => ({ text, tags })
     const plan = planFixture()
     plan.subjects = ['lin']
@@ -55,7 +55,7 @@ test('image Agent reads historical character designs and submits text and tags w
   fx.chat().characterDesignDocument.characters[0].design.appearance = '红发'
   const before = structuredClone(fx.chat())
   await fx.service.start('parent', 2, sceneTarget(fx.chat(), 2).key)
-  await until(async () => (await fx.service.status('parent', 2)).status === 'succeeded')
+  await until(async () => { const status = await fx.service.status('parent', 2); assert.notEqual(status.status, 'failed', status.error); return status.status === 'succeeded' })
   assert.deepEqual(fx.chat(), before)
 })
 
@@ -758,7 +758,7 @@ test('disabling keeps saved images accessible but rejects generation from anothe
   await fx.service.configure({ enabled: false })
   assert.equal((await fx.service.status('parent', 2)).status, 'succeeded')
   assert.deepEqual((await fx.service.readImage('parent', 2, key)).data, png)
-  await assert.rejects(fx.service.start('parent', 2, key), /手动启用/)
+  await assert.rejects(fx.service.start('parent', 2, key), /本局设置/)
   assert.equal(fx.imageCalls(), 1)
 })
 
@@ -823,6 +823,8 @@ test('complete one-click native child Agent flow, no foreground writes, durable 
         tools: { restrict() {}, register(tool) { registered.set(tool.name, tool); return () => {} } }, on(name, fn) { hooks[name] = fn }
       })
       const agent = { session, followup: value => { followup = value }, async whenIdle() {
+        // Match DSH's request-time resolution of dynamic prompt sections.
+        if (typeof persona === 'function') persona = persona({ agent, turn: 1, step: 1 })
         await hooks['agent/pre-step']({ agent, turn: 1, step: 1 }, async () => ({ kind: 'enter', messages: [] }))
         const { characters, ...layout } = planFixture('A woman at a rainy window')
         await registered.get('submit_scene_layout').execute(layout)
@@ -832,6 +834,7 @@ test('complete one-click native child Agent flow, no foreground writes, durable 
       return { agent, async dispose() { disposed++ } }
     }
   } })
+  t.after(() => runner.dispose())
   const fx = await fixture(t, { runAgent: runner.run })
   const before = structuredClone(fx.chat()), target = sceneTarget(fx.chat(), 2)
   const starts = await Promise.all([fx.service.start('parent', 2, target.key), fx.service.start('parent', 2, target.key)])
@@ -847,7 +850,6 @@ test('complete one-click native child Agent flow, no foreground writes, durable 
   assert.equal(disposed, 0, 'image Agent remains resident after the task')
   assert.equal(descriptor.mode, 'continuable')
   assert.equal((await fx.store.readJson(imagePath + 'agent.json')).sessionId, childOptions.sessionId)
-  t.after(() => runner.dispose())
   assert.deepEqual(fx.chat(), before)
   assert.equal(status.attachment, undefined)
   const restarted = fx.createService()
@@ -1131,15 +1133,17 @@ test('repaint bypasses text Agent, retains each version and deduplicates replaye
 test('image-only adjustment uses just old plan plus instruction, persists through provider failure, and does not change canonical plans', async t => {
   let calls = 0, generated = 0
   const outputBudgets = []
+  let promptVersion = 1
   const fx = await fixture(t, {
+    prompt: name => name + ':v' + promptVersion,
     generate: async input => { generated++; if (generated === 2) throw new Error('temporary image error'); return { data: png, mediaType: 'image/png' } },
     runAgent: async input => {
       calls++
+      assert.equal(input.system, (calls === 1 ? 'scene-plan:v1' : 'scene-image-adjustment:v2'))
       outputBudgets.push(input.maxTokens)
       if (input.tools.some(tool => tool.name === 'submit_scene_plan')) await submitPlanCall(input, { arguments: { plan: planFixture() } })
       else {
         assert.equal(input.tools[0].name, 'submit_image_adjustment')
-        assert.equal(input.system, readSceneAdjustmentInstruction())
         const context = JSON.parse(input.messages[0].content[0].text)
         assert.equal(context.instruction, '改成雨夜')
         assert.equal(context.sources, undefined)
@@ -1152,6 +1156,7 @@ test('image-only adjustment uses just old plan plus instruction, persists throug
   const key = sceneTarget(fx.chat(), 2).key
   await fx.service.start('parent', 2, key)
   const first = await until(async () => { const state = await fx.service.status('parent', 2); return state.status === 'succeeded' && state })
+  promptVersion = 2
   const options = { kind: 'adjust', versionId: first.versions[0].id, instruction: '改成雨夜' }
   const originalPlans = await fx.store.readJson(imagePath + 'plans.json')
   await fx.service.start('parent', 2, key, options)
@@ -1257,86 +1262,100 @@ test('image-only style adjustment is saved only on its picture and global style 
   assert.deepEqual(await fx.store.readJson(imagePath + 'plans.json'), canonical)
 })
 
-test('a later shot reuses the turn\'s channel tag blocks instead of resubmitting every field', async t => {
-  const missing = []
-  const fx = await fixture(t, { runAgent: async input => {
-    const payload = JSON.parse(input.messages[0].content[0].text)
-    missing.push({ shot: payload.shot && payload.shot.index, blocks: (payload.missingBlocks || []).map(block => block.owner + '/' + block.field) })
-    // The program hands back stable ids for people it already knows; only the first
-    // shot introduces the local id.
-    const known = (payload.characters || [])[0]
-    const plan = { ...planFixture(), subjects: [known ? known.id : 'lin'], continuity: missing.length === 1 ? 'uncertain' : 'continued',
-      characters: [{ id: known ? known.id : 'lin', ...(known ? {} : { name: '林' }), fields: {
-        appearance: { text: '黑色短发', tags: 'short black hair' },
-        clothing: { text: '白裙', tags: 'white dress' } } }],
-      scene: { environment: { text: '雨夜窗边', tags: 'rainy night, window' } } }
-    await submitPlanCall(input, { arguments: { plan } })
-    return { traceSessionId: 'image-child' }
-  } })
-  await fx.service.configure({ auto: { enabled: true, minPerTurn: 2, charsPerImage: 500, maxPerTurn: 9 } })
-  await fx.service.autoRun('parent', 2)
-  assert.equal((await fx.service.status('parent', 2)).versions.length, 2)
-  assert.deepEqual(missing.map(entry => entry.shot), [1, 2])
-  assert.deepEqual(missing[1].blocks, [], '第二张只提交变化字段，不再要求重交整轮标签')
-})
-
-test('automatic batches render several shots of one settled turn without a click', async t => {
-  const planned = []
-  const fx = await fixture(t, { runAgent: async input => {
-    planned.push(JSON.parse(input.messages[0].content[0].text).shot)
-    await submitPlanCall(input, { arguments: { plan: planFixture() } })
-    return { traceSessionId: 'image-child' }
-  } })
-  await fx.service.configure({ auto: { enabled: true, minPerTurn: 3, charsPerImage: 500, maxPerTurn: 9 } })
-  await fx.service.autoRun('parent', 2)
-  const status = await fx.service.status('parent', 2)
-  assert.equal(status.status, 'succeeded')
-  assert.equal(status.versions.length, 3, 'the configured minimum of three shots is rendered')
-  assert.deepEqual(status.versions.map(version => version.shot && version.shot.index), [1, 2, 3])
-  assert.deepEqual(planned, [{ index: 1, total: 3 }, { index: 2, total: 3 }, { index: 3, total: 3 }], 'every shot plans with its own position in the batch')
-  assert.equal(fx.imageCalls(), 3)
-})
-
-test('automatic batches stay off until the policy is enabled and never serve an older turn', async t => {
+test('status tolerates an unsynced or removed body while image writes stay strict', async t => {
   const fx = await fixture(t)
-  await fx.service.autoRun('parent', 2)
-  assert.equal(fx.imageCalls(), 0, 'a disabled policy requests nothing')
-  assert.equal((await fx.service.status('parent', 2)).status, 'idle')
-
-  await fx.service.configure({ auto: { enabled: true, minPerTurn: 3, charsPerImage: 500, maxPerTurn: 9 } })
-  const chat = fx.chat()
-  chat.messages.push({ role: 'assistant', turn: 3, sourceText: '后来她又坐下了。' })
-  fx.setChat(chat)
-  await fx.service.autoRun('parent', 2)
-  assert.equal(fx.imageCalls(), 0, 'an older turn is not illustrated by the automatic batch')
+  const before = structuredClone(fx.chat())
+  const missing = await fx.service.status('parent', 3)
+  assert.equal(missing.status, 'unavailable')
+  assert.equal(missing.reason, 'target-unavailable')
+  assert.equal(missing.key, undefined)
+  assert.equal(missing.error, undefined)
+  await assert.rejects(fx.service.start('parent', 3, 'missing'), /正文已不存在/)
+  assert.deepEqual(fx.chat(), before)
+  fx.chat().messages.push({ role: 'assistant', turn: 3, text: '正文同步完成。' })
+  assert.equal((await fx.service.status('parent', 3)).status, 'idle')
 })
 
-test('a queue-full rejection earns exactly one automatic retry; other failures stop the batch', async t => {
-  let retryCalls = 0
-  const retrying = await fixture(t, { autoRetryDelayMs: 1, generate: async () => {
-    retryCalls += 1
-    if (retryCalls === 1) {
-      const error = new Error('生图渠道请求失败（HTTP 503）')
-      error.imageFailure = { httpStatus: 503 }
-      throw error
-    }
-    return { data: png, mediaType: 'image/png' }
-  } })
-  await retrying.service.configure({ provider: 'novelai', baseURL: 'https://relay.example', model: 'nai-diffusion-4-5-full', size: '832x1216', apiKey: 'key' })
-  await retrying.service.configure({ auto: { enabled: true, minPerTurn: 1, charsPerImage: 5000, maxPerTurn: 1 } })
-  await retrying.service.autoRun('parent', 2)
-  assert.equal(retryCalls, 2, '排队失败只重发一次')
-  assert.equal((await retrying.service.status('parent', 2)).versions.length, 1)
+test('status on a long chat does not hash every historical prefix without image references', async t => {
+  const fx = await fixture(t)
+  const chat = { ...chatFixture(), messages: Array.from({ length: 100 }, (_, i) => ({ role: 'assistant', turn: i + 1, text: '普通合成正文。'.repeat(100) })) }
+  let reads = 0
+  Object.defineProperty(chat.messages[0], 'text', { get() { reads++; return '第一轮。' } })
+  fx.deps.chatForSession = async () => chat
+  const status = await fx.service.status('parent', 100)
+  assert.equal(status.status, 'idle')
+  assert.ok(reads <= 2, `Expected one target prefix, observed ${reads} historical reads`)
+})
 
-  let calls = 0
-  const failing = await fixture(t, { autoRetryDelayMs: 1, generate: async () => {
-    calls += 1
-    const error = new Error('生图渠道请求失败（HTTP 500）')
-    error.imageFailure = { httpStatus: 500 }
-    throw error
-  } })
-  await failing.service.configure({ provider: 'novelai', baseURL: 'https://relay.example', model: 'nai-diffusion-4-5-full', size: '832x1216', apiKey: 'key' })
-  await failing.service.configure({ auto: { enabled: true, minPerTurn: 3, charsPerImage: 500, maxPerTurn: 9 } })
-  await assert.rejects(failing.service.autoRun('parent', 2), /结果未确认，服务可能已计费；不会自动重新生图/)
-  assert.equal(calls, 1, '结果不确定的失败不会自动重发，也不会继续下一张')
+test('concurrent illustration status reads share only an in-flight chat read', async t => {
+  const fx = await fixture(t)
+  let reads = 0, release
+  fx.deps.chatForSession = async () => { reads++; await new Promise(resolve => { release = resolve }); return structuredClone(fx.chat()) }
+  const first = fx.service.status('parent', 2), second = fx.service.status('parent', 2)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(reads, 1, 'message mounts share the current read, not independent full chat loads')
+  release();await Promise.all([first, second])
+  fx.chat().messages[1].swipes[0] = '已修改的正文。'
+  const next = fx.service.status('parent', 2)
+  await new Promise(resolve => setImmediate(resolve));assert.equal(reads, 2)
+  release();assert.equal((await next).key, sceneTarget(fx.chat(), 2).key, 'later reads see story edits')
+})
+
+test('sparse reference status preserves branch validation without hashing unrelated turns', async t => {
+  const fx = await fixture(t)
+  const chat = { ...chatFixture(), messages: Array.from({ length: 100 }, (_, i) => ({ role: 'assistant', turn: i + 1, text: '合成正文。' })) }
+  const source = sceneTarget(chat, 2), activation = sceneTarget(chat, 3)
+  await fx.store.writeJson(imagePath + 'references.json', { version: 1, records: [{ id: 'ref', source: { ...source, versionId: 'pic' }, activation,
+    person: { id: 'alice', name: 'Alice' }, enabled: true, gateway: 'old-channel' }] })
+  let reads = 0, opening = '合成正文。'
+  Object.defineProperty(chat.messages[0], 'text', { get() { reads++; return opening } })
+  fx.deps.chatForSession = async () => chat
+  const state = await fx.service.status('parent', 2)
+  assert.deepEqual(state.reference.versions, ['pic'], 'existing references remain visible even after a channel change')
+  assert.ok(reads <= 3, `Only target, source and activation prefixes are needed; observed ${reads}`)
+  opening = '另一条剧情分支。'
+  assert.deepEqual((await fx.service.status('parent', 2)).reference.versions, [], 'edited prefixes invalidate the old branch reference')
+})
+
+test('status read coalescing cannot mix sessions or retain a rejected read', async t => {
+  const fx = await fixture(t)
+  let fail = true
+  fx.deps.chatForSession = async sessionId => {
+    if (sessionId === 'broken' && fail) throw new Error('read failed')
+    return { ...structuredClone(fx.chat()), id: sessionId }
+  }
+  const results = await Promise.allSettled([fx.service.status('broken', 2), fx.service.status('healthy', 2)])
+  assert.equal(results[0].status, 'rejected')
+  assert.equal(results[1].status, 'fulfilled')
+  fail = false
+  assert.notEqual((await fx.service.status('broken', 2)).key, results[1].value.key)
+})
+
+test('deleting the last image permits a fresh generation without replaying the deleted request', async t => {
+  const fx = await fixture(t)
+  const before = structuredClone(fx.chat()), key = sceneTarget(fx.chat(), 2).key
+  await fx.service.start('parent', 2, key, { requestId: 'original-image-request' })
+  const first = await until(async () => { const state = await fx.service.status('parent', 2); return state.status === 'succeeded' && state })
+  const removed = await fx.service.removeImage('parent', 2, key, first.versions[0].id)
+  assert.equal(removed.status, 'idle'); assert.equal(removed.hasDeletedImages, true); assert.deepEqual(removed.versions, [])
+  await assert.rejects(fx.service.readImage('parent', 2, key, first.versions[0].id), /已删除/)
+  const restarted = fx.createService()
+  assert.equal((await restarted.status('parent', 2)).hasDeletedImages, true)
+  await restarted.start('parent', 2, key, { requestId: 'original-image-request' })
+  assert.equal(fx.imageCalls(), 1)
+  await restarted.start('parent', 2, key, { requestId: 'replacement-image-request' })
+  const next = await until(async () => { const state = await restarted.status('parent', 2); return state.status === 'succeeded' && state })
+  assert.equal(next.versions.length, 1); assert.notEqual(next.versions[0].id, first.versions[0].id)
+  assert.equal(fx.imageCalls(), 2); assert.deepEqual(fx.chat(), before)
+})
+
+test('关闭姿势结算后生图忽略当前及历史快照中的姿势', () => {
+  const chat = chatFixture(), target = sceneTarget(chat, 2)
+  chat.backgroundTasks = { posture: false }
+  assert.equal(sceneInput(chat, target).posture, '')
+  assert.equal(sceneInput(chat, target, { posture: '历史姿态' }).posture, '')
+  chat.backgroundTasks.posture = true
+  assert.equal(sceneInput(chat, target, { posture: '历史姿态', backgroundTasks: { posture: false } }).posture, '')
+  assert.equal(sceneInput(chat, target, { posture: '历史姿态' }).posture, '历史姿态')
+  assert.equal(chat.posture, '站在窗边，左手扶窗')
 })

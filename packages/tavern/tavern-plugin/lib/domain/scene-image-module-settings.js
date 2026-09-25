@@ -2,11 +2,27 @@ import { channelSettings, imageCredentialRef, channelNeedsKey } from './scene-im
 import { imageStyleSettings, SCENE_STYLE_PRESETS } from './scene-image-style.js'
 
 const path = 'scene-images/settings.json'
+const AUTO_DEFAULTS = { enabled: false, minPerTurn: 3, charsPerImage: 500, maxPerTurn: 9 }
+/** Validate the Tavern-owned automatic illustration policy; a batch trusts only these bounds. */
+export function validateAutoSettings(value) {
+  if (value === undefined) return { ...AUTO_DEFAULTS }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('自动配图设置必须是对象')
+  const enabled = value.enabled === undefined ? AUTO_DEFAULTS.enabled : value.enabled
+  if (typeof enabled !== 'boolean') throw new Error('自动配图的启用状态必须为布尔值')
+  const minPerTurn = value.minPerTurn === undefined ? AUTO_DEFAULTS.minPerTurn : value.minPerTurn
+  const maxPerTurn = value.maxPerTurn === undefined ? AUTO_DEFAULTS.maxPerTurn : value.maxPerTurn
+  const charsPerImage = value.charsPerImage === undefined ? AUTO_DEFAULTS.charsPerImage : value.charsPerImage
+  if (!Number.isInteger(minPerTurn) || minPerTurn < 1 || minPerTurn > 9) throw new Error('每轮最少张数必须是 1–9 的整数')
+  if (!Number.isInteger(maxPerTurn) || maxPerTurn < 1 || maxPerTurn > 9) throw new Error('每轮最多张数必须是 1–9 的整数')
+  if (!Number.isInteger(charsPerImage) || charsPerImage < 100 || charsPerImage > 5000) throw new Error('每多少字一张必须是 100–5000 的整数')
+  if (maxPerTurn < minPerTurn) throw new Error('每轮最多张数不能小于每轮最少张数')
+  return { enabled, minPerTurn, charsPerImage, maxPerTurn }
+}
 function document(value = {}) {
   // Opt in explicitly; keep saved choices when reading older configurations.
-  if (!Object.keys(value).length) return { version: 4, provider: 'openai', enabled: false, style: imageStyleSettings(), providers: {} }
-  if ([2, 3, 4].includes(value.version)) return { ...value, provider: value.provider || 'openai', enabled: value.enabled === true, style: imageStyleSettings(value.style), providers: { ...value.providers } }
-  return { version: 2, provider: 'openai', enabled: value.enabled === true, style: imageStyleSettings(value.style), providers: { openai: channelSettings(value, 'openai') } }
+  if (!Object.keys(value).length) return { version: 4, provider: 'openai', enabled: false, style: imageStyleSettings(), auto: { ...AUTO_DEFAULTS }, providers: {} }
+  if ([2, 3, 4].includes(value.version)) return { ...value, provider: value.provider || 'openai', enabled: value.enabled === true, style: imageStyleSettings(value.style), auto: validateAutoSettings(value.auto), providers: { ...value.providers } }
+  return { version: 2, provider: 'openai', enabled: value.enabled === true, style: imageStyleSettings(value.style), auto: validateAutoSettings(value.auto), providers: { openai: channelSettings(value, 'openai') } }
 }
 
 /** Tavern owns enable/style only. Provider settings belong to the image module. */
@@ -24,7 +40,7 @@ export function createModuleSceneImageSettings({ store, credentials, imageModule
     const oldKey = resolveKey && migration && channelNeedsKey(value) ? await credentials()?.resolve(imageCredentialRef(value.provider, value.authType)) : undefined
     return { ...value, enabled: doc.enabled,
       ready: !migration && current.ready, hasKey: migration ? Boolean(oldKey?.value) : current.hasKey,
-      style: doc.style, stylePresets: SCENE_STYLE_PRESETS, activeProvider: doc.provider === 'dsh-image-gen' ? current.provider : doc.provider }
+      style: doc.style, auto: doc.auto, stylePresets: SCENE_STYLE_PRESETS, activeProvider: doc.provider === 'dsh-image-gen' ? current.provider : doc.provider }
   }
   async function migrationInput(input, current) {
     if (!current.migrationPending || input.apiKey || !channelNeedsKey(current)) return input
@@ -49,7 +65,7 @@ export function createModuleSceneImageSettings({ store, credentials, imageModule
       const current = await read(input.provider)
       const id = current.provider
       const changesProvider = id !== (doc.provider === 'dsh-image-gen' ? current.activeProvider : doc.provider)
-      const edits = Object.keys(input).some(key => !['provider', 'enabled'].includes(key))
+      const edits = Object.keys(input).some(key => !['provider', 'enabled', 'auto'].includes(key))
       if (input.enabled === true && (changesProvider || edits)) throw new Error('请先保存完整生图配置，再手动启用')
       let next = current
       if (edits) {
@@ -63,7 +79,8 @@ export function createModuleSceneImageSettings({ store, credentials, imageModule
         const providers = { ...latest.providers }
         if (!next.migrationPending) { delete providers[id]; if (latest.provider === 'dsh-image-gen') delete providers['dsh-image-gen'] }
         return { ...latest, version: 4, provider: id, providers, style: doc.style,
-          enabled: input.enabled ?? doc.enabled }
+          enabled: input.enabled ?? doc.enabled,
+          auto: input.auto === undefined ? latest.auto : validateAutoSettings(input.auto) }
       })
       return read()
     }),

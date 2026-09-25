@@ -170,3 +170,18 @@ test('native chooser drops an empty primary while preserving alternate opening i
   assert.equal(result.openings[0].openingPreview.selectedIndex, 0)
   assert.equal(result.openings[0].openingPreview.swipes[1], 'story')
 })
+
+test('开场隐藏原始变量协议内容，但保留原文用于初始化', async () => {
+  const text = '开场正文\n<UpdateVariable>_.set("hp", 10);</UpdateVariable>\n<initvar>stat_data:\n  hp: 10</initvar>\n继续剧情'
+  const card = { name: '变量开场', first_mes: text }
+  const result = await projectCardOpeningPreviews({ card, extensions: {} })
+  const preview = result.openings[0].projection.parts.map(part => part.text || part.content).join('')
+  assert.match(preview, /开场正文/)
+  assert.match(preview, /继续剧情/)
+  assert.doesNotMatch(preview, /stat_data|hp|_\.set/)
+  const committed = projectOpeningCommit(text)
+  assert.equal(committed.renderedText, text)
+  assert.equal(committed.sessionText, text)
+  assert.doesNotMatch(JSON.stringify(committed.displayParts), /stat_data|hp|_\.set/)
+  assert.equal(card.first_mes, text)
+})

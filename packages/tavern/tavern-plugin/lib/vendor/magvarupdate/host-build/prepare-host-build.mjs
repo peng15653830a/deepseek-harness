@@ -154,3 +154,48 @@ variablesSource = replaceExactlyOnce(variablesSource,
   "const variables = getLastValidVariable(request_message_id) ?? (() => { const current = getVariables({ type: 'message', message_id }); return _.has(current, 'stat_data') && _.has(current, 'schema') ? current : undefined; })();",
   'allow complete current-floor MVU baseline when history has none')
 await writeFile(variablesPath, variablesSource)
+
+// ST JSONL compaction cannot write host-owned history snapshots through saveChat.
+// Disable it at the plugin boundary, including legacy enabled settings. Keep the
+// restore listener for imported chats and leave variable calculation untouched.
+for (const [file, signature, body] of [
+  ['legacy_chat.ts', 'export async function checkAndCleanupLegacyChat()', 'export async function checkAndCleanupLegacyChat() {}\n'],
+  ['cleanup_variables.ts', 'export function cleanupMessageVariables(', 'export function cleanupMessageVariables(_start: number, _end: number, _interval: number) { return 0; }\n'],
+]) {
+  const filePath = path.join(root, 'src/function/cleanup', file)
+  const original = await readFile(filePath, 'utf8')
+  replaceExactlyOnce(original, signature, signature, 'disable host-incompatible cleanup: ' + file)
+  await writeFile(filePath, '// DSH Tavern preserves authoritative historical variable snapshots.\n' + body)
+}
+const buttonsPath = path.join(root, 'src/button.ts')
+let buttonsSource = await readFile(buttonsPath, 'utf8')
+const cleanupButton = buttonsSource.match(/    \{\n        name: '清除旧楼层变量',[\s\S]*?\n    \},/)
+if (!cleanupButton) throw new Error('官方 MVU 清理按钮已变化，无法安全应用宿主转换')
+buttonsSource = replaceExactlyOnce(buttonsSource, cleanupButton[0], '', 'remove unsupported manual cleanup button')
+await writeFile(buttonsPath, buttonsSource)
+
+const cleanupPanelPath = path.join(root, 'src/panel/Cleanup.vue')
+const cleanupPanel = await readFile(cleanupPanelPath, 'utf8')
+replaceExactlyOnce(cleanupPanel, '<Section :label="t(\'panel.cleanup.section\')">', '', 'replace unsupported cleanup controls')
+await writeFile(cleanupPanelPath, `<template>
+    <Section :label="t('panel.cleanup.section')">
+        <template #content>
+            <p>DSH Tavern 暂不支持旧变量清理，历史变量会保留用于回退和恢复。</p>
+        </template>
+    </Section>
+</template>
+<script setup lang="ts">
+import Section from '@/panel/component/Section.vue';
+import { useMvuI18n } from '@/i18n';
+const { t } = useMvuI18n();
+</script>
+`)
+
+const notificationPath = path.join(root, 'src/function/notification/index.ts')
+let notificationSource = await readFile(notificationPath, 'utf8')
+for (const flag of ['已提醒自动清理旧变量功能', '已默认开启自动清理旧变量功能']) {
+  notificationSource = replaceExactlyOnce(notificationSource,
+    `if (store.settings.internal.${flag} === false) {`,
+    'if (false) {', 'suppress unsupported cleanup notification: ' + flag)
+}
+await writeFile(notificationPath, notificationSource)

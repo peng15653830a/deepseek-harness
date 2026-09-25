@@ -23,54 +23,23 @@ function fixture(initial = {}) {
   const nodes = tree => tree && typeof tree === 'object' ? [tree, ...(tree.children || []).flat(Infinity).flatMap(nodes)] : []
   const render = () => { cursor = 0; return nodes(Component()) }
   render(); slots[0] = structuredClone(saved)
-  return { render, calls, slots, fail: () => { failure = true }, switch: () => render().find(n => n.props?.role === 'switch'),
-    toggle: checked => render().find(n => n.props?.role === 'switch').props.onChange({ target: { checked } }),
-    save: () => render().find(n => n.type === 'button' && n.children.includes('保存并启用')).props.onClick() }
+  return { render, calls, slots, fail: () => { failure = true },
+    save: () => render().find(n => n.type === 'button' && n.children.includes('保存生图 API 配置')).props.onClick() }
 }
 
-test('disabled configuration starts collapsed; manual opening does not enable or generate before saving', async () => {
-  const f = fixture({ enabled: false, migrationPending: true })
-  assert.equal(f.switch().props.checked, false)
-  assert.equal(f.render().some(n => n.type === 'select'), false)
-  assert.equal(f.render().filter(n => n.props?.role === 'switch').length, 1)
-  await f.toggle(true)
-  assert.equal(f.switch().props.checked, false, 'opening incomplete configuration must not claim generation is enabled')
+test('global API form is visible while disabled and saving never enables a game', async () => {
+  const f = fixture({ enabled: false })
+  assert.equal(f.render().filter(n => n.props?.role === 'switch').length, 0)
   assert.ok(f.render().some(n => n.type === 'select'))
-  assert.equal(f.calls.length, 0)
   await f.save()
-  assert.equal(f.calls.length, 2)
-  assert.equal(f.calls[0].args.enabled, undefined)
-  assert.equal(f.calls[1].args.enabled, true)
-  assert.equal(f.switch().props.checked, true)
-  assert.ok(f.render().some(n => n.children?.includes('已保存并启用')))
+  assert.equal(f.calls.length, 1)
+  assert.equal(Object.hasOwn(f.calls[0].args, 'enabled'), false)
+  assert.equal(f.slots[0].enabled, false)
 })
 
-test('closing preserves drafts and disables the saved provider; reopening an unchanged saved config enables directly', async () => {
-  const f = fixture({ ready: true, enabled: true })
-  assert.equal(f.switch().props.checked, true)
-  await f.toggle(false)
-  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0].args)), { enabled: false })
-  assert.equal(f.switch().props.checked, false)
-  assert.equal(f.render().filter(n => n.type === 'select').length, 0)
-  await f.toggle(true)
-  assert.equal(f.calls[1].args.enabled, true)
-  assert.equal(f.calls[1].args.apiKey, undefined)
-
-  f.slots[0] = { ...f.slots[0], provider: 'preview-only' }; f.slots[1] = true; f.slots[2] = 'unsaved-key'
-  await f.toggle(false)
-  assert.equal(f.calls.at(-1).args.provider, undefined)
-  assert.equal(f.slots[2], 'unsaved-key')
-  await f.toggle(true)
-  assert.equal(f.calls.length, 3, 'dirty preview only expands, never saves or enables it')
-})
-
-test('failed disable stays open and enabled; failed direct enable rolls switch back with visible error', async () => {
-  const on = fixture({ ready: true, enabled: true }); on.fail()
-  await on.toggle(false)
-  assert.equal(on.switch().props.checked, true)
-  assert.ok(on.render().some(n => n.props?.role === 'status' && n.children.includes('保存失败')))
-  const off = fixture({ ready: true }); off.fail()
-  await off.toggle(true)
-  assert.equal(off.switch().props.checked, false)
-  assert.ok(off.render().some(n => n.props?.role === 'status' && n.children.includes('保存失败')))
+test('global API save failure preserves draft credentials and displays the error', async () => {
+  const f = fixture(); f.slots[2] = 'draft-key'; f.fail()
+  await f.save()
+  assert.equal(f.slots[2], 'draft-key')
+  assert.ok(f.render().some(n => n.props?.role === 'status' && n.children.includes('保存失败')))
 })

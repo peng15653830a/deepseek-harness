@@ -107,6 +107,7 @@ test('后台 MVU 命令只在隔离草稿执行并原子提交，协议不进入
 
 test('MVU Runtime 只返回确定性 effect；重复应用不会重复 delta', async function () {
   const value = chat()
+  value._storageRevision = 4
   value.mvu.owner = 'official'
   let adapter
   let dispatches = 0
@@ -123,6 +124,11 @@ test('MVU Runtime 只返回确定性 effect；重复应用不会重复 delta', a
       status: function () { return { present: true, ready: true, busy: false } },
       async dispatch(_sessionId, _name, _args, _context, work) {
         dispatches++
+        const receipt = await adapter.updateVariables('session-1', { type: 'chat' }, { marker: true }, 2, work.eventId,
+          { chatId: value.id, stateRevision: 4, lifecycleRevision: 2 })
+        assert.equal(receipt.transactional, true)
+        assert.ok(receipt.context)
+        assert.equal(receipt.contextDelta, undefined)
         const current = value.messages[0].variables[0].stat_data?.hp ?? value.messages[0].variables[0].hp
         await adapter.updateMessages('session-1', [{
           message_id: 0,
@@ -426,17 +432,17 @@ test('服务重启后结算立即挂起，由上层在浏览器重新登记后�
   assert.equal(run.writes.length, 0)
 })
 
-test('MVU 执行回执超时释放事务，不写入草稿并明确提示重试', async () => {
+test('MVU 执行失联释放事务，不写入草稿并保留待恢复状态', async () => {
   const gate = createTavernScriptDispatch({ timeoutMs: 100 })
   gate.touch('session-1', 'browser', true)
   const run = harness(chat(), { scriptDispatch: gate })
   const input = { operationId: 'timeout-settlement-1', sessionId: 'session-1', messageId: 0, swipeId: 0, expectedLifecycleRevision: 2,
     storyText: '旧正文', command: '<UpdateVariable></UpdateVariable>' }
-  const rejected = assert.rejects(run.adapter.settleMvuUpdate(input), /回执超时.*重试/)
+  const deferred = run.adapter.settleMvuUpdate(input)
   await new Promise(resolve => setImmediate(resolve))
   const offer = gate.claim('session-1', 'browser', true)
   gate.start('session-1', offer.event.id, offer.leaseToken, 'browser')
-  await rejected
+  assert.equal((await deferred).deferred, true)
   assert.equal(run.writes.length, 0)
   assert.equal(gate.status('session-1').busy, false)
   gate.dispose('session-1')
@@ -488,4 +494,138 @@ test('Helper creation waits for native session publication and propagates public
   assert.equal((await task).updated, true)
   const failed = harness(chat(), { publishCreatedMessages: async () => { throw new Error('native flush failed') } })
   await assert.rejects(failed.adapter.createMessages('session-1', [{ role: 'user', message: '开局' }], {}, 2), /native flush failed/)
+})
+
+
+test('变量重算在隔离副本恢复基线，替换已结算结果而不重复扣减', async () => {
+  const value = chat()
+  value.messages.unshift({ role: 'user', text: '行动', variables: [{ stat_data: { hp: 4 }, schema: {} }] })
+  const targetId = 1
+  value.messages[targetId].displayText = '<div>已渲染正文</div>'
+  value.messages[targetId].variables[0] = { stat_data: { hp: 7 }, schema: {} }
+  let adapter
+  adapter = harness(value, { scriptDispatch: {
+    async dispatch(_session, _event, _args, context, work) {
+      assert.equal(context.messages[targetId].variables.stat_data.hp, 10)
+      assert.equal(context.messages[0].variables.stat_data.hp, 10)
+      assert.equal(value.messages[0].variables[0].stat_data.hp, 4)
+      assert.equal(value.messages[targetId].variables[0].stat_data.hp, 7)
+      await adapter.updateMessages('session-1', [{ message_id: targetId,
+        data: { stat_data: { hp: context.messages[targetId].variables.stat_data.hp - 1 }, schema: {} }
+      }], 2, work.eventId)
+      return { handled: true }
+    }
+  } }).adapter
+  const result = await adapter.settleMvuUpdate({ operationId: 'retry', sessionId: 'session-1',
+    messageId: targetId, swipeId: 0, expectedLifecycleRevision: 2, storyText: '旧正文',
+    preserveForeground: true, baselineVariables: { stat_data: { hp: 10 }, schema: {} }, command: '<UpdateVariable/>',
+    validate: ({ before, after }) => {
+      assert.equal(before.stat_data.hp, 10)
+      assert.equal(after.stat_data.hp, 9)
+      return { changes: [], failures: [] }
+    }
+  })
+  assert.equal(value.messages[targetId].variables[0].stat_data.hp, 7)
+  applyMvuSettlementEffect(value, result.effect)
+  assert.equal(value.messages[targetId].variables[0].stat_data.hp, 9)
+  assert.equal(value.messages[0].variables[0].stat_data.hp, 4)
+  assert.equal(value.messages[targetId].text, '旧正文')
+  assert.equal(value.messages[targetId].displayText, '<div>已渲染正文</div>')
+})
+
+test('服务重启后迟到的 MVU 事件不能越过已消失的草稿直接写入聊天', async () => {
+  const h = harness()
+  await assert.rejects(h.adapter.updateMessages('session-1', [{ message_id: 0, data: { hp: 0 } }], 2, 'mvu-work:old-attempt'), /结算事件/)
+  assert.equal(h.writes.length, 0)
+})
+
+test('已有普通事件执行时，MVU 延后领取事务，不拒绝该事件的合法写入', async t => {
+  const dispatch = createTavernScriptDispatch({ timeoutMs: 5000 })
+  dispatch.touch('session-1', 'browser', true)
+  t.after(() => dispatch.dispose('session-1'))
+  const ordinary = dispatch.dispatch('session-1', 'MESSAGE_RECEIVED', [0], null, { eventId: 'ordinary-event' })
+  const offer = dispatch.claim('session-1', 'browser', true)
+  dispatch.start('session-1', offer.event.id, offer.leaseToken, 'browser')
+  let releaseCard
+  const card = new Promise(resolve => { releaseCard = resolve })
+  const run = harness(chat(), { scriptDispatch: dispatch, readCard: () => card })
+  const settlement = run.adapter.settleMvuUpdate({ operationId: 'overlapping', sessionId: 'session-1',
+    messageId: 0, swipeId: 0, expectedLifecycleRevision: 2, command: '<UpdateVariable/>' })
+  const outcome = settlement.then(value => value, error => error)
+  await new Promise(resolve => setImmediate(resolve))
+  let failure
+  try {
+    await run.adapter.updateMessages('session-1', [{ message_id: 0, data: { hp: 12 } }], 2, offer.event.id)
+  } catch (error) { failure = error }
+  releaseCard({})
+  const result = await outcome
+  dispatch.complete('session-1', offer.event.id, [0], 'browser', offer.leaseToken)
+  await ordinary
+  assert.equal(failure?.code, undefined, failure?.message)
+  assert.equal(run.writes.length, 1)
+  assert.equal(result.deferred, true)
+})
+
+test('同时开始的 MVU 尝试不会在 await 之后互相覆盖事务所有权', async () => {
+  let run
+  run = harness(chat(), { scriptDispatch: { async dispatch(_session, _name, _args, _context, work) {
+    await run.adapter.updateMessages('session-1', [{ message_id: 0, data: { hp: 13 } }], 2, work.eventId)
+    return { handled: true }
+  } } })
+  const input = { sessionId: 'session-1', messageId: 0, swipeId: 0, expectedLifecycleRevision: 2, command: '<UpdateVariable/>' }
+  const results = await Promise.allSettled([
+    run.adapter.settleMvuUpdate({ ...input, operationId: 'first' }),
+    run.adapter.settleMvuUpdate({ ...input, operationId: 'second' })
+  ])
+  assert.equal(results.filter(result => result.status === 'fulfilled' && result.value.updated).length, 1,
+    results.map(result => result.reason?.message || result.status).join('; '))
+  assert.match(results.find(result => result.status === 'rejected').reason.message, /已有.*结算/)
+  assert.equal(run.writes.length, 0, '有效尝试仍只返回草稿 effect，不能提前持久化')
+})
+
+test('MVU 已预约执行器但还在准备上下文时，新生命周期事件返回 busy', async t => {
+  const dispatch = createTavernScriptDispatch({ timeoutMs: 5000 })
+  dispatch.touch('session-1', 'browser', true)
+  t.after(() => dispatch.dispose('session-1'))
+  let releaseCard
+  const card = new Promise(resolve => { releaseCard = resolve })
+  const run = harness(chat(), { scriptDispatch: dispatch, readCard: () => card })
+  const settlement = run.adapter.settleMvuUpdate({ operationId: 'preparing', sessionId: 'session-1',
+    messageId: 0, swipeId: 0, expectedLifecycleRevision: 2, command: '<UpdateVariable/>' })
+  const outcome = settlement.then(value => value, error => error)
+  await new Promise(resolve => setImmediate(resolve))
+  const ordinary = run.adapter.dispatchEvent({ sessionId: 'session-1', name: 'MESSAGE_RECEIVED', args: [0], context: {} })
+  await new Promise(resolve => setImmediate(resolve))
+  const early = dispatch.claim('session-1', 'browser', true)
+  if (early.event) {
+    dispatch.start('session-1', early.event.id, early.leaseToken, 'browser')
+    dispatch.complete('session-1', early.event.id, [0], 'browser', early.leaseToken)
+  }
+  const result = await ordinary
+  releaseCard({})
+  await new Promise(resolve => setImmediate(resolve))
+  const work = dispatch.claim('session-1', 'browser', true)
+  dispatch.start('session-1', work.event.id, work.leaseToken, 'browser')
+  await run.adapter.updateMessages('session-1', [{ message_id: 0, data: { hp: 14 } }], 2, work.event.id)
+  dispatch.complete('session-1', work.event.id, [0], 'browser', work.leaseToken)
+  assert.equal((await outcome).updated, true)
+  assert.equal(early.event, null)
+  assert.equal(result.busy, true)
+})
+
+test('global template settings read and save without resolving any game', async () => {
+  const current = { EjsTemplate: { enabled: false }, otherPlugin: { enabled: true } }
+  let saved
+  const { adapter } = harness(chat(), {
+    resolveChat: async () => { throw new Error('must not read a game') },
+    fullExtensionSettings: {
+      read: async () => structuredClone(current),
+      save: async (next, base) => { saved = { next, base }; return next }
+    }
+  })
+  assert.deepEqual(await adapter.readGlobalPromptTemplateSettings(), { settings: { enabled: false } })
+  assert.deepEqual(await adapter.saveGlobalPromptTemplateSettings({ enabled: true }, { enabled: false }), { updated: true, settings: { enabled: true } })
+  assert.deepEqual(saved.base, current)
+  assert.deepEqual(saved.next.otherPlugin, current.otherPlugin)
+  await assert.rejects(adapter.saveGlobalPromptTemplateSettings([], {}), /模板设置/)
 })

@@ -13,27 +13,31 @@ test('Tavern 客户端样式作为独立本地资源提供', async () => {
   assert.match(asset.body.toString('utf8'), /@keyframes dsh-tavern-pulse/)
 })
 
-test('Web 宿主只装载样式模块，不再内嵌整份 CSS', async () => {
+test('Web 宿主直接注入完整内置样式，重复加载与升级复用同一个节点', async () => {
   const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
-  const appended = []
+  const css = await readFile(new URL('../tavern-plugin/lib/client-assets/tavern.css', import.meta.url), 'utf8')
+  const nodes = []
   const document = {
-    querySelector() { return null },
-    createElement(name) { return { name, dataset: {} } },
-    head: { appendChild(node) { appended.push(node) } }
+    querySelector() { return nodes.find(node => node.tag === 'style') },
+    querySelectorAll() { return [...nodes] },
+    createElement(tag) {
+      assert.equal(tag, 'style', 'no external stylesheet link')
+      return { tag, dataset: {}, remove() { nodes.splice(nodes.indexOf(this), 1) } }
+    },
+    head: { appendChild(node) { nodes.push(node) } }
   }
   let descriptor
   vm.runInNewContext(source, { document, window: { __ModuleLoader__: { load(value) { descriptor = value } } }, console })
   descriptor.factory(() => ({}))
-  assert.equal(appended.length, 1)
-  assert.deepEqual(appended[0], {
-    name: 'link', rel: 'stylesheet',
-    dataset: { plugin: 'dsh-tavern-plugin', pluginCss: 'dsh-tavern-plugin/tavern.css' },
-    href: '/api/dsh-tavern/client-assets/tavern.css?v=20260912-system-prompts'
-  })
-  const existing = { href: '/api/dsh-tavern/client-assets/tavern.css', getAttribute() { return this.href }, setAttribute(name, value) { this[name] = value } }
-  document.querySelector = () => existing
+  assert.equal(nodes.length, 1)
+  const current = nodes[0]
+  assert.equal(current.textContent, css)
+  assert.equal(current.dataset.plugin, 'dsh-tavern-plugin')
   descriptor.factory(() => ({}))
-  assert.equal(existing.href, appended[0].href)
-  assert.equal(appended.length, 1, 'refresh the existing stylesheet without appending a duplicate')
-  assert.doesNotMatch(source, /const TAVERN_CSS\s*=\s*`/)
+  assert.equal(nodes.length, 1)
+  current.textContent = 'outdated styles'
+  descriptor.factory(() => ({}))
+  assert.equal(nodes[0], current)
+  assert.equal(current.textContent, css)
+  assert.doesNotMatch(source, /__TAVERN_BUNDLED_CSS__|client-assets\/tavern\.css\?v=/)
 })

@@ -10,7 +10,7 @@ function claimAndStart(gate, sessionId, runtimeId = 'legacy') {
   return offer
 }
 
-test('默认执行预算覆盖多个隔离 Helper 脚本的串行事件上限', function () {
+test('默认执行租约允许短暂断线，持续确认可续租', function () {
   assert.equal(TAVERN_SCRIPT_EXECUTION_TIMEOUT_MS, 60000)
 })
 
@@ -53,7 +53,7 @@ test('claim 响应丢失后重放同一 offer，显式 start 后才进入执行�
   assert.equal(gate.status('session-a').phase, 'executing')
 
   const result = await pending
-  assert.equal(result.timedOut, true)
+  assert.equal(result.executionLost, true)
   assert.equal(result.phase, 'executing')
 })
 
@@ -77,8 +77,9 @@ test('claimed script work times out without blocking later events', async functi
   claimAndStart(gate, 'session-a')
   const result = await first
   assert.equal(result.handled, false)
-  assert.equal(result.timedOut, true)
+  assert.equal(result.executionLost, true)
   clock = 50
+  gate.touch('session-a', 'legacy', true)
   const pending = gate.dispatch('session-a', 'MESSAGE_SENT', [4])
   const offer = claimAndStart(gate, 'session-a')
   const event = offer.event
@@ -181,4 +182,62 @@ test('claim 尚未同步失败时，事件回执也识别初始化失败并脱�
   const result = await pending
   assert.equal(result.initializationFailed, true)
   assert.doesNotMatch(result.error, /secret-value/)
+})
+
+test('取消任务立即释放队列并拒绝旧回执，执行器仍可处理下一任务', async () => {
+  const gate = createTavernScriptDispatch()
+  const controller = new AbortController()
+  gate.claim('s', 'browser', true)
+  const pending = gate.dispatch('s', 'MESSAGE_RECEIVED', [], null, { signal: controller.signal })
+  const offer = gate.claim('s', 'browser', true)
+  gate.start('s', offer.event.id, offer.leaseToken, 'browser')
+  controller.abort()
+  assert.equal((await pending).disposed, true)
+  assert.equal(gate.status('s').busy, false)
+  assert.equal(gate.status('s').ready, true)
+  assert.equal(gate.complete('s', offer.event.id, [], 'browser', offer.leaseToken), false)
+})
+
+test('完成回执可重复确认，查询与续租严格校验执行身份', async () => {
+  const gate = createTavernScriptDispatch({ executionTimeoutMs: 100 })
+  gate.touch('s', 'browser', true)
+  const pending = gate.dispatch('s', 'MESSAGE_RECEIVED', [1])
+  const { event, leaseToken } = claimAndStart(gate, 's', 'browser')
+  try {
+    assert.equal(gate.workState('s', event.id, leaseToken, 'other', true).phase, 'unknown')
+    for (let i = 0; i < 4; i++) {
+      await new Promise(resolve => setTimeout(resolve, 40))
+      assert.equal(gate.workState('s', event.id, leaseToken, 'browser', true).phase, 'executing')
+    }
+    assert.equal(gate.complete('s', event.id, [2], 'browser', leaseToken), true)
+    assert.equal(gate.complete('s', event.id, [2], 'browser', leaseToken), true)
+    assert.equal(gate.workState('s', event.id, leaseToken, 'browser').phase, 'completed')
+    assert.deepEqual(await pending, { handled: true, args: [2] })
+  } finally { gate.dispose('s') }
+})
+
+test('失联只延期工作并撤销就绪状态，旧执行器不能再提交', async () => {
+  const gate = createTavernScriptDispatch({ executionTimeoutMs: 100 })
+  gate.touch('s', 'browser', true)
+  const pending = gate.dispatch('s', 'MESSAGE_RECEIVED', [1])
+  const offer = claimAndStart(gate, 's', 'browser')
+  assert.equal((await pending).executionLost, true)
+  assert.equal(gate.status('s').ready, false)
+  assert.equal(gate.workState('s', offer.event.id, offer.leaseToken, 'browser', true).phase, 'unknown')
+  assert.equal(gate.complete('s', offer.event.id, [2], 'browser', offer.leaseToken), false)
+})
+
+test('服务重启的新租约不接受旧 start 或完成回执，即使事件 ID 相同', async () => {
+  const old = createTavernScriptDispatch(), fresh = createTavernScriptDispatch()
+  old.touch('s', 'browser', true)
+  const before = old.dispatch('s', 'UPDATE', [], null, { eventId: 'same' })
+  const a = claimAndStart(old, 's', 'browser')
+  old.dispose('s'); await before
+  fresh.touch('s', 'browser', true)
+  const after = fresh.dispatch('s', 'UPDATE', [], null, { eventId: 'same' })
+  const b = claimAndStart(fresh, 's', 'browser')
+  assert.notEqual(a.leaseToken, b.leaseToken)
+  assert.equal(fresh.workState('s', a.event.id, a.leaseToken, 'browser', true).phase, 'unknown')
+  assert.equal(fresh.complete('s', a.event.id, [], 'browser', a.leaseToken), false)
+  fresh.dispose('s'); await after
 })

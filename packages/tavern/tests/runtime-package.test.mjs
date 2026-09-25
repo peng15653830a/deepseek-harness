@@ -14,6 +14,7 @@ const windows = await readFile(new URL('../install.ps1', import.meta.url), 'utf8
 const workspace = parse(await readFile(new URL('../pnpm-workspace.yaml', import.meta.url), 'utf8'))
 const patches = Object.values(workspace.patchedDependencies || {}).map(value => typeof value === 'string' ? value : value.path)
 const required = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'bin/dsh-compatibility.mjs', 'bin/dsh-tavern.mjs', 'bin/launcher-environment.mjs', 'bin/launcher-settings.mjs', 'bin/profile-installation.mjs', 'bin/service-lifecycle.mjs', 'bin/application-update.mjs', 'config/dsh-compatibility.json', ...patches]
+required.push('tavern-plugin/lib/domain/server-template-runtime.js', 'tavern-plugin/lib/domain/server-template-worker.js', 'tavern-plugin/lib/vendor/st-prompt-template/server-artifact/engine.js', 'tavern-plugin/lib/vendor/st-prompt-template/server-artifact/manifest.json')
 required.push('tavern-plugin/lib/domain/tavern-client-assets.js', 'tavern-plugin/lib/client-assets/tavern.css')
 required.push('bin/build-tavern-client.mjs', 'tavern-plugin/src/client/main.js',
   ...['runtime-generation-monitor', 'library-refresh', 'live-tavern-view'].map(name => `tavern-plugin/src/client/modules/${name}.js`))
@@ -53,5 +54,25 @@ test('CDN 清单生成器包含全部依赖补丁及其校验值', async t => {
     const content = await readFile(path.join(fixture, file))
     assert.equal(entry.size, content.length)
     assert.equal(entry.sha256, createHash('sha256').update(content).digest('hex'))
+  }
+})
+
+test('Git 增量归档在用户开启 CRLF 转换时仍保持运行文件原始字节', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'tavern-archive-eol-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const git = args => execFileSync('git', args, { cwd: directory })
+  git(['init', '-q'])
+  const source = Buffer.from('#!/bin/sh\necho hello\n')
+  await writeFile(path.join(directory, 'install.sh'), source)
+  git(['-c', 'core.autocrlf=false', 'add', '.'])
+  git(['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'fixture'])
+  git(['config', 'core.autocrlf', 'true'])
+  for (const installer of [unix, windows]) {
+    const line = installer.split('\n').find(line => line.includes('git.archive') && line.includes('--format='))
+    assert.ok(line, 'Installer must invoke the logged Git archive operation')
+    const flags = [...line.replace(/['",]/g, '').matchAll(/-c\s+(core\.[a-z]+=[a-z]+)/g)].flatMap(match => ['-c', match[1]])
+    assert.deepEqual(flags, ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'])
+    const archive = git([...flags, 'archive', '--format=tar', 'HEAD'])
+    assert.deepEqual(execFileSync('tar', ['-xOf', '-', 'install.sh'], { input: archive }), source)
   }
 })

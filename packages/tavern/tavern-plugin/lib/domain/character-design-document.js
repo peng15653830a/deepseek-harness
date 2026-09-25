@@ -3,21 +3,14 @@ export const CHARACTER_DESIGN_SAVE_TOOL_NAME = 'character_design_save'
 
 const SPEC = 'dsh-tavern.character-design-document'
 const REQUIRED_DESIGN_FIELDS = Object.freeze([
-  'identity', 'narrativeRole', 'coreMotivation', 'innerConflict', 'personality', 'appearance',
-  'behaviorStyle', 'speechStyle', 'relationships', 'defaultPresentation', 'plotPotential'
+  'identity', 'personality', 'appearance', 'speechStyle', 'narrativeRole'
 ])
 const PRESENTATION_FIELDS = Object.freeze([
   ['identity', '身份'],
-  ['narrativeRole', '剧情作用'],
-  ['coreMotivation', '核心动机'],
-  ['innerConflict', '内在矛盾'],
   ['personality', '性格'],
   ['appearance', '外貌'],
-  ['behaviorStyle', '行为方式'],
   ['speechStyle', '说话方式'],
-  ['relationships', '人物关系'],
-  ['defaultPresentation', '默认形象'],
-  ['plotPotential', '剧情潜力']
+  ['narrativeRole', '剧情作用'],
 ])
 const UNKNOWN_MARKER = /未明确|未知|待定|不详|尚未设定|暂未决定/
 
@@ -46,11 +39,23 @@ function text(value, field, limit = 4000) {
   return result
 }
 
+function mergeDesign(value) {
+  const design = object(value)
+  const merge = keys => [...new Set(keys.map(key => str(design[key]).trim()).filter(Boolean))].join('\n\n')
+  return {
+    ...Object.fromEntries(REQUIRED_DESIGN_FIELDS.map(key => [key, design[key]])),
+    narrativeRole: merge(['narrativeRole', 'plotPotential']),
+    personality: str(design.personality),
+    appearance: merge(['appearance', 'defaultPresentation'])
+  }
+}
+
 function normalizeDocument(value) {
   const source = object(clone(value))
   const characters = Array.isArray(source.characters)
     ? source.characters.filter(function (item) { return item !== null && typeof item === 'object' && !Array.isArray(item) }).map(function (item) {
       const normalized = clone(item)
+      normalized.design = mergeDesign(normalized.design)
       delete normalized.id
       return normalized
     })
@@ -81,6 +86,7 @@ export function projectCharacterDesignDocument(value) {
 }
 
 function designFrom(input) {
+  input = mergeDesign(input)
   return Object.fromEntries(REQUIRED_DESIGN_FIELDS.map(function (field) {
     return [field, text(input[field], field)]
   }))
@@ -107,16 +113,10 @@ export const CHARACTER_DESIGN_SAVE_TOOL = Object.freeze({
       name: stringProperty('人物姓名。'),
       aliases: { type: 'array', description: '可选别名。', items: { type: 'string' } },
       identity: stringProperty('完整身份与社会位置。'),
-      narrativeRole: stringProperty('人物在故事中的持续作用。'),
-      coreMotivation: stringProperty('核心欲望与行动动力。'),
-      innerConflict: stringProperty('内在矛盾、顾虑或代价。'),
       personality: stringProperty('鲜明、可观察且彼此一致的性格。'),
-      appearance: stringProperty('完整外貌、体型与辨识特征。'),
-      behaviorStyle: stringProperty('行为习惯、反应方式与动作风格。'),
+      appearance: stringProperty('外貌、体型、辨识特征与日常穿着。'),
       speechStyle: stringProperty('语言习惯、语气与表达方式。'),
-      relationships: stringProperty('与现有人物或群体的关系立场。'),
-      defaultPresentation: stringProperty('完整默认形象与穿着，可在剧情中继续更新。'),
-      plotPotential: stringProperty('可能推动后续剧情的动机、矛盾或关系接口；不预写既成剧情。')
+      narrativeRole: stringProperty('剧情作用：人物在故事中的作用及可能的发展方向，不预写既成剧情。'),
     },
     required: ['name', ...REQUIRED_DESIGN_FIELDS]
   })

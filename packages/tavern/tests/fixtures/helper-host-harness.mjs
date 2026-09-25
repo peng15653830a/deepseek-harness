@@ -14,8 +14,8 @@ export function helperHostHarness(context = {}, options = {}) {
   const html = helperClient.buildTavernHelperScriptDocument({ token: 'host-test', scripts, context: { compatibilityCapabilities: TAVERN_COMPATIBILITY_CAPABILITIES, ...context } })
   let source = html.match(/<script data-dsh-tavern-helper-script>([\s\S]*?)<\/script>/)[1]
   const downloads = [
-    'import("/api/dsh-tavern/vendor/runtime-assets/zod/index.mjs")',
-    'import("/api/dsh-tavern/vendor/runtime-assets/yaml/index.mjs")'
+    'import(new URL("/api/dsh-tavern/vendor/runtime-assets/zod/index.mjs",document.baseURI).href)',
+    'import(new URL("/api/dsh-tavern/vendor/runtime-assets/yaml/index.mjs",document.baseURI).href)'
   ]
   for (const download of downloads) {
     assert(source.includes(download))

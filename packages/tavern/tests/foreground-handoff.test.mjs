@@ -4,7 +4,7 @@ import test from 'node:test'
 import { createForegroundHandoff } from '../tavern-plugin/lib/domain/foreground-handoff.js'
 import { prepareWorldBookRecall } from '../tavern-plugin/lib/domain/worldbook-recall.js'
 
-test('直接输入首轮前召回开场关键词，不扫描玩家输入、不调用结算模型、不重复准备', async () => {
+test('开场预扫描只提供预览，不调用结算模型、不重复准备', async () => {
   const chat = { id: 'opening', mode: 'story', messages: [{ role: 'assistant', greeting: true, text: '铜铃渡口旁有星砂信箱。', turn: 1 }] }
   const entries = ['铜铃渡口', '星砂信箱', '玩家专有词'].map((key, index) => ({ ref: 'entry:' + index, enabled: true, constant: false, primaryKeys: [key], content: '秘密' + index }))
   let preparations = 0
@@ -21,9 +21,9 @@ test('直接输入首轮前召回开场关键词，不扫描玩家输入、不�
     turns: {
       async finalize() {}, async discard() {},
       async prepare() {
-        assert.deepEqual(chat.preparedWorldBook.refs, ['entry:0', 'entry:1'])
-        assert.match(chat.preparedWorldBookContext, /秘密0/)
-        assert.match(chat.preparedWorldBookContext, /秘密1/)
+        assert.deepEqual(chat.preparedWorldBook.refs, [])
+        assert.doesNotMatch(chat.preparedWorldBookContext, /秘密0/)
+        assert.doesNotMatch(chat.preparedWorldBookContext, /秘密1/)
         assert.doesNotMatch(chat.preparedWorldBookContext, /秘密2/)
       }
     }

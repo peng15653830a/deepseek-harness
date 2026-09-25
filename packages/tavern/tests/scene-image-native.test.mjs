@@ -1,3 +1,4 @@
+import { zipText } from './fixtures/zip-text.mjs'
 import { sessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -84,7 +85,7 @@ test('显式单人参考跨轮与重启传给 Gemini，取消后不再发送，�
   assert.equal(second.versions[0].referenceImages[0].source.versionId, first.versions[0].id)
   assert.equal(second.versions[0].referenceImages[0].person.name, '林岚')
   assert.equal(JSON.stringify(runtime.requests).includes(image.data.slice(0, 100)), false)
-  assert.equal((await runtime.exportLogs()).buffer.toString('utf8').includes(image.data.slice(0, 100)), false)
+  assert.equal(zipText((await runtime.exportLogs()).buffer).includes(image.data.slice(0, 100)), false)
   await runtime.service.configure({ provider: 'openai' })
   await runtime.service.configure({ enabled: true })
   assert.match((await runtime.service.status('scene-parent', 2)).reference.warning, /仅使用文字/)
@@ -162,7 +163,7 @@ test('日志 ZIP 连接真实生图子 Session 与成功失败诊断，不导出
   await runtime.service.start('scene-parent', 1, target.key, { confirmNewRequestId: failed.requestId })
   assert.equal((await finish()).status, 'succeeded')
   const exported = await runtime.exportLogs()
-  const zip = exported.buffer.toString('utf8')
+  const zip = zipText(exported.buffer)
   assert.match(zip, /scene-images\/diagnostics.json/)
   assert.match(zip, /subagents\/[^/]+\/session.jsonl/)
   assert.match(zip, /submit_scene_plan/)
@@ -394,7 +395,7 @@ test('真实 DSH 子 Agent 调用生图工具，HTTP 返回图经宿主校验落
   assert.equal(runtime.imageRequests.length, 1)
   assert.match(runtime.imageRequests[0].prompt, /window/)
   assert.equal(runtime.requests.length, 2)
-  assert.deepEqual(runtime.requests[0].tools.map(tool => tool.name), ['character_design_read', 'submit_scene_character', 'submit_scene_layout', 'submit_scene_plan'])
+  assert.deepEqual(runtime.requests[0].tools.map(tool => tool.name), ['character_design_read', 'skill', 'submit_scene_character', 'submit_scene_layout', 'submit_scene_plan', 'tavern_read_skill_reference'])
   const receipt = confirmationReceipt(runtime, status.traceSessionId)
   assert.equal(receipt.ok, true)
   assert.equal(receipt.status, 'succeeded')
@@ -424,7 +425,7 @@ test('真实 DSH 子 Agent 调用生图工具，HTTP 返回图经宿主校验落
   const adjusted = await finish({ kind: 'adjust', versionId: originalVersion, instruction: '改成雨夜近景' })
   assert.equal(runtime.requests.length, 3)
   assert.equal(runtime.imageRequests.length, 3)
-  assert.deepEqual(runtime.requests[2].tools.map(tool => tool.name), ['character_design_read', 'submit_image_adjustment'])
+  assert.deepEqual(runtime.requests[2].tools.map(tool => tool.name), ['character_design_read', 'skill', 'submit_image_adjustment', 'tavern_read_skill_reference'])
   assert.equal(adjusted.traceSessionId, status.traceSessionId, 'adjustment resumes the original child after runner disposal')
   assert.match(JSON.stringify(runtime.requests[2].messages), /左手轻轻搭着窗框/, 'original planning history remains in the child')
   assert.doesNotMatch(JSON.stringify(runtime.requests[2].messages.at(-1)), /左手轻轻搭着窗框/, 'new adjustment input does not resend the source text')

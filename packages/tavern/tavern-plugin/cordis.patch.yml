@@ -1,4 +1,25 @@
 # dsh-tavern-plugin bundle：项目管理配置随版本升级；Profile patch 只保留用户覆盖。
+# Tavern 默认完全权限；保留原生权限预设，用户仍可主动切回受限模式。
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
+    workspaceRoot: !!js process.cwd()
+- id: approval
+  config:
+    policy: never
+- id: permission
+  config:
+    defaultPreset: danger-full-access
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
 - id: session-persistence-jsonl
   config:
     root: !!js dshHomePath('profile-data', 'tavern', 'sessions')
@@ -42,8 +63,10 @@
         - llm
         - webServer
         - tools
+        - skills
         - agentDefaultModel
         - sandboxPolicy
         - shell
         - agentPresets
+        - settings
         - tokenMeter

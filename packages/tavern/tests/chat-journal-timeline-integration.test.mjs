@@ -1,3 +1,5 @@
+import { createBackgroundTaskCoordinator } from '../tavern-plugin/lib/domain/background-task-coordinator.js'
+import { createMvuSettlementEffect, applyMvuSettlementEffect } from '../tavern-plugin/lib/domain/mvu-settlement-effect.js'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
@@ -67,4 +69,49 @@ test('正文 checkpoint 使用 revision cursor，并从 journal 历史完成回�
   assert.match(journal, /"source":"foreground.commit"/)
   assert.match(journal, /"source":"rollback"/)
   assert.doesNotMatch(journal, /"before":\{/)
+})
+
+test('MVU 保存点经真实 journal 重开后恢复，变量与完成回执在同一次提交持久化', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'tavern-mvu-delivery-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const open = () => createChatPersistence({ store: createChatJournalStore({ dataRoot: root }) })
+  let db = open()
+  const timeline = createStoryTimeline()
+  const tasks = () => createBackgroundTaskCoordinator({ timeline,
+    store: { readChat: id => db.read(id), writeChat: (chat, meta) => db.write(chat, meta), updateChat: (id, fn, meta) => db.update(id, fn, meta) } })
+  let coordinator = tasks()
+  let chat = { id: 'c', sessionId: 's', mode: 'story', messages: [] }
+  const body = timeline.apply({ chat, intent: { kind: 'body.begin', turn: 1 } })
+  chat = timeline.complete({ chat: body.chat, operationId: body.value.operationId, basedOn: body.value.basedOn,
+    outcome: { status: 'success' }, apply(draft) {
+      draft.messages.push({ role: 'assistant', text: '正文', swipeId: 0, variables: [{ hp: 10 }], mvu: { pending: true } })
+    } }).chat
+  await db.write(chat)
+  const task = await coordinator.begin(await db.read('c'), 'settlement')
+  const before = await db.read('c'), after = structuredClone(before)
+  after.messages[0].variables[0].hp = 9
+  const effect = createMvuSettlementEffect({ operationId: task.operationId, chatId: 'c', sessionId: 's',
+    branchId: task.basedOn.branchId, basedOnRevision: task.basedOn.revision,
+    expectedLifecycleRevision: 0, messageId: 0, swipeId: 0, before, after })
+  await task.checkpoint(draft => {
+    draft.messages[0].mvu.pendingSubmission = { operations: [{ op: 'delta', path: '/hp', value: -1 }] }
+    draft.messages[0].mvu.delivery = { version: 1, operationId: task.operationId, branchId: task.basedOn.branchId,
+      revision: task.basedOn.revision, lifecycleRevision: 0, swipeId: 0, prepared: { effect } }
+  })
+  db = open(); coordinator = tasks()
+  assert.equal((await db.read('c')).messages[0].variables[0].hp, 10)
+  await coordinator.recover(await db.read('c'))
+  const resumed = await coordinator.begin(await db.read('c'), 'settlement')
+  const apply = draft => {
+    applyMvuSettlementEffect(draft, draft.messages[0].mvu.delivery.prepared.effect)
+    draft.messages[0].mvu = { pending: false, receipt: { status: 'updated' } }
+  }
+  await resumed.commit({ stateChanged: true, apply })
+  db = open()
+  const committed = await db.read('c')
+  assert.equal(committed.messages[0].variables[0].hp, 9)
+  assert.equal(committed.messages[0].mvu.receipt.status, 'updated')
+  assert.equal(committed.messages[0].mvu.delivery, undefined)
+  await resumed.commit({ stateChanged: true, apply })
+  assert.equal((await db.read('c')).messages[0].variables[0].hp, 9)
 })

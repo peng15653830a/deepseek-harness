@@ -1,7 +1,8 @@
+import { replaceSessionSurface } from './session-surface-mutations.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { editableReplyParts } from './reply-presentation.js'
 import { locateRegenerationSurface } from './rollback-surface.js'
-import { sessionEvents } from './session-events.js'
+import { sessionEvents, appendSessionEvent } from './session-events.js'
 
 function latest(chat) {
   const message = chat.messages?.at(-1)
@@ -22,21 +23,25 @@ export async function synchronizeBodyEdits(session, chat, flush) {
     const { id, seq, turn } = message.bodyEdit
     if (recorded.has(id)) continue
     if (!session.surface?.nodes.includes(seq)) throw new Error('编辑正文尚未同步，原消息已不在上下文中')
-    session.append('assistant/message', {
+    replaceSessionSurface(session, 'assistant/message', {
       turn, step: 1,
       message: { id, role: 'assistant', content: [{ type: 'text', text: message.text }], source: { kind: 'model', provider: 'dsh-tavern', model: 'body-edit' } }
-    }, { surfaceOp: { op: 'replace', start: seq, end: seq } })
+    }, { start: seq, end: seq, sourceEventSeqs: [seq] })
   }
   if ((chat.messages || []).some(message => message.bodyEdit)) await flush(session)
 }
 
 /** Edit prose only; do not replay macros, scripts or settlement. */
-export function createBodyEditor({ chats, sessions, timeline, activity, project, present }) {
+export function createBodyEditor({ chats, sessions, timeline, activity, project, present, sessionPatch }) {
   const pending = new Set()
+  function refuseClosedPatch() {
+    if (sessionPatch && !sessionPatch.replacementAllowed()) throw new Error(sessionPatch.blockReason())
+  }
   function idle(chat, agent) {
     if (agent?.phase?.kind === 'running' || chat.regenInProgress || ['pending', 'running'].includes(chat.settleStatus) || activity(chat)?.busy) throw new Error('请等待当前生成或后台处理完成后再编辑')
   }
   async function context(sessionId) {
+    refuseClosedPatch()
     const chat = await chats.forSession(sessionId)
     if (!chat) throw new Error('会话不存在')
     const agent = sessions.get(sessionId)
@@ -78,6 +83,12 @@ export function createBodyEditor({ chats, sessions, timeline, activity, project,
         const swipe = Number(message.swipeId) || 0
         if (typeof patch.swipes[swipe] === 'string') patch.swipes[swipe] = text
       }
+      // Validate on an isolated native Session before the durable Chat intent.
+      // A rejected host event must never publish an edit that future requests
+      // will keep trying (and failing) to synchronize. Accepted writes retain
+      // the existing journal-first recovery path for disk/flush failures.
+      const preview = agent.session.constructor.fromRestore(agent.session.id, structuredClone(sessionEvents(agent.session)), structuredClone(agent.session.header), agent.session.inheritedEventCount, 'detached')
+      await synchronizeBodyEdits(preview, { messages: [{ ...message, ...patch }] }, async () => {})
       const saved = await chats.update(chat.id, current => {
         idle(current, agent)
         if (token(current, latest(current)) !== input.token) throw new Error('正文或会话已变化，请重新打开编辑')

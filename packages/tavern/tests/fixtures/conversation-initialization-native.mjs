@@ -1,6 +1,7 @@
 import { createChatHistoryImportService } from '../../tavern-plugin/lib/domain/chat-history-import-service.js'
 import { createImportContextPreparation } from '../../tavern-plugin/lib/domain/import-context-preparation.js'
-import { sessionEvents } from '../../tavern-plugin/lib/domain/session-events.js'
+import { sessionEvents, appendSessionEvent } from '../../tavern-plugin/lib/domain/session-events.js'
+import { projectRuntimePresetRequest } from '../../tavern-plugin/lib/domain/runtime-preset-lifecycle.js'
 // Production initialization, Chat journal and installed DSH Session/Agent loop.
 // All files are temporary and the text model is scripted; no paid requests.
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
@@ -18,7 +19,7 @@ import { createProfileDataStore } from '../../tavern-plugin/lib/profile-data-sto
 import { createSessionStablePrefixStorage, ensureSessionStablePrefix, sessionStablePrefixSections } from '../../tavern-plugin/lib/domain/session-stable-prefix.js'
 import { createStoryTimeline } from '../../tavern-plugin/lib/domain/story-timeline.js'
 
-export async function createInitializationNative(bootPath) {
+export async function createInitializationNative(bootPath, { preset } = {}) {
   const bootUrl = pathToFileURL(bootPath)
   const { boot } = await import(bootUrl.href)
   const { LlmAdapter } = await import(new URL('../../dsh-llm/lib/index.js', bootUrl))
@@ -28,6 +29,15 @@ export async function createInitializationNative(bootPath) {
   const packages = ['dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-llm', 'dsh-session', 'dsh-session-projection', 'dsh-token-meter', 'dsh-commands', 'dsh-agent-loop']
   await writeFile(config, packages.map(name => '- id: ' + name + '\n  name: ' + new URL('../../' + name + '/lib/index.js', bootUrl).href + '\n').join(''))
   const ctx = await boot('initialization-native-test', config)
+  if (preset) {
+    const projected = new WeakSet()
+    ctx.on('llm/stream', (request, next) => {
+      if (projected.has(request)) return next()
+      const adapted = projectRuntimePresetRequest(request, preset)
+      projected.add(adapted)
+      return ctx.llm.stream(adapted)
+    })
+  }
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembly = await next()
     assembly.sections = sessionStablePrefixSections(context.agent.session)
@@ -39,7 +49,7 @@ export async function createInitializationNative(bootPath) {
   const sessionId = 'opening-session'
   const worldBooks = { bound: async () => ({ view: { entries: [
     { ref: 'constant', enabled: true, constant: true, content: 'Fixture constant worldbook' },
-    { ref: 'dynamic', enabled: true, primaryKeys: ['导入开场'], content: 'Fixture recalled worldbook' }
+    { ref: 'dynamic', enabled: true, primaryKeys: ['走到花店'], content: 'Fixture recalled worldbook' }
   ] } }) }
   let target, persistence, importer
   const card = { path: 'cards/test.json', name: '角色', first_mes: '{{user}}，你好。', description: '不可丢失的固定背景', system_prompt: 'Fixture card special instruction', post_history_instructions: 'Fixture card writing constraint' }
@@ -54,7 +64,7 @@ export async function createInitializationNative(bootPath) {
   class FixtureModel extends LlmAdapter {
     async resolveModel(provider, id) { return { provider, id, name: id, context: { contextWindow: 2000 } } }
     async *stream(input) {
-      requests.push(structuredClone({ system: input.system, messages: input.messages, purpose: input.purpose }))
+      requests.push(structuredClone({ system: input.messages.filter(message => message.role === 'system').flatMap(message => message.content).map(block => block.text || '').join('\n\n'), messages: input.messages, purpose: input.purpose }))
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: '继续故事。' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
@@ -132,7 +142,7 @@ export async function createInitializationNative(bootPath) {
       session.append('user/message', { id: 'later-input', role: 'user', content: [{ type: 'text', text: 'L'.repeat(2500) }], source: { kind: 'user' } }, { surfaceOp: 'append' })
       session.append('turn/start', { turn })
       session.append('step/start', { turn, step: 1 })
-      session.append('assistant/message', { turn, step: 1, message: { id: 'later-body', role: 'assistant', content: [{ type: 'text', text: 'Later body' }], source: { kind: 'model', ...selection } } }, { surfaceOp: 'append' })
+      appendSessionEvent(session, 'assistant/message', { turn, step: 1, message: { id: 'later-body', role: 'assistant', content: [{ type: 'text', text: 'Later body' }], source: { kind: 'model', ...selection } } }, { surfaceOp: 'append', sourceEventSeqs: [] })
       session.append('step/end', { turn, step: 1 })
       session.append('turn/end', { turn, reason: { kind: 'completed' } })
       session.append('turn/start', { turn: 51 })

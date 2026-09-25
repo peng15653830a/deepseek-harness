@@ -152,16 +152,20 @@ export function createDurableTaskMailbox(options = {}) {
     })
   }
 
-  async function sync(chatId, selector = {}) {
+  async function sync(chatId, selector = {}, project) {
     return await serialize(chatId, async function () {
-      const chat = await store.readChat(chatId)
-      if (!chat) return { mailboxVersion: 0, task: null }
+      let chat = await store.readChat(chatId)
+      const result = (mailboxVersion, task) => ({ mailboxVersion, task, ...(project ? { projection: project(chat) } : {}) })
+      if (!chat) return result(0, null)
       const mailbox = mailboxOf(chat)
       const task = findTask(mailbox, selector)
-      if (!task) return { mailboxVersion: mailbox.version, task: null }
+      if (!task) return result(mailbox.version, null)
       const repair = await reconcile(chat, publicTask(task))
-      if (repair && typeof repair === 'object' && applyPatch(mailbox, task, repair)) await store.writeChat(chat, { source: str(task.kind) + '.mailbox.reconcile', requestId: str(task.requestId), operationId: str(task.operationId) })
-      return { mailboxVersion: mailbox.version, task: publicTask(task) }
+      if (repair && typeof repair === 'object' && applyPatch(mailbox, task, repair)) {
+        const saved = await store.writeChat(chat, { source: str(task.kind) + '.mailbox.reconcile', requestId: str(task.requestId), operationId: str(task.operationId) })
+        if (saved?.id === chat.id) chat = saved
+      }
+      return result(mailboxOf(chat).version, publicTask(findTask(mailboxOf(chat), selector)))
     })
   }
 

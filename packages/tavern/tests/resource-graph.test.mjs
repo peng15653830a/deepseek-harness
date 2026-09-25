@@ -15,7 +15,9 @@ function harness(fault) {
       mountedResources: [{ kind: 'card', path: 'cards/old.json', label: 'old' }]
     }
   }
+  const organizationMoves = []
   const options = {
+    cardOrganization: { async movePath(from, to) { organizationMoves.push([from, to]) } },
     resources: {
       async rename(oldPath) {
         const next = 'cards/new.json'
@@ -40,7 +42,7 @@ function harness(fault) {
     fault
   }
   return {
-    options,
+    options, organizationMoves,
     graph: createResourceGraph(options),
     snapshot() { return { resourcePaths: [...resourcePaths], operation: structuredClone(operation), index: structuredClone(index), chat: structuredClone(chat) } }
   }
@@ -56,6 +58,7 @@ test('资源已改名但 Chat 投影前崩溃时，重启完成整个资源图',
   await createResourceGraph(Object.assign({}, app.options, { fault: undefined })).recover()
 
   assert.equal(app.snapshot().operation, null)
+  assert.deepEqual(app.organizationMoves, [['cards/old.json', 'cards/new.json']])
   assert.equal(app.snapshot().chat.cardPath, 'cards/new.json')
   assert.equal(app.snapshot().chat.workspace.sourcePaths[0], 'cards/new.json')
   assert.equal(app.snapshot().chat.workspace.mountedResources[0].path, 'cards/new.json')
@@ -69,6 +72,7 @@ test('资源删除后崩溃时，重启清理 Chat 中的旧引用', async funct
   await createResourceGraph(Object.assign({}, app.options, { fault: undefined })).recover()
 
   assert.deepEqual(app.snapshot().resourcePaths, [])
+  assert.deepEqual(app.organizationMoves, [['cards/old.json', null]])
   assert.deepEqual(app.snapshot().chat.workspace.sourcePaths, [])
   assert.deepEqual(app.snapshot().chat.workspace.mountedResources, [])
 })

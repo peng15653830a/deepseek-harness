@@ -12,18 +12,20 @@ function createLiveTavernViewModule(options) {
 	const timeoutRetryDelayMs = Number(options.timeoutRetryDelayMs) > 0 ? Number(options.timeoutRetryDelayMs) : 0;
 	const idlePollIntervalMs = Number(options.idlePollIntervalMs) > 0 ? Number(options.idlePollIntervalMs) : 0;
 	const pollWhileBusy = options.pollWhileBusy !== false;
+	const cacheRetentionMs = Number(options.cacheRetentionMs) || 0;
 	function initialState() { return { phase: "idle", view: null, error: "", updatedAt: 0 }; }
 	function recordFor(sessionId) {
 		const id = String(sessionId || "");
-		if (!records.has(id)) records.set(id, { id: id, state: initialState(), listeners: new Set(), timer: null, watchdog: null, loading: false, reloadRequested: false, optimisticBusy: false });
+		if (!records.has(id)) records.set(id, { id: id, state: initialState(), listeners: new Set(), timer: null, watchdog: null, loading: false, reloadRequested: false, optimisticBusy: false, eviction: null, controller: null });
 		return records.get(id);
 	}
 	function publish(record, state) {
+		if (records.get(record.id) !== record) return;
 		record.state = state;
 		record.listeners.forEach(function (listener) { listener(state); });
 	}
 	function schedule(record, delay) {
-		if (record.listeners.size === 0) return;
+		if (records.get(record.id) !== record || record.listeners.size === 0) return;
 		if (record.timer !== null) cancelTimer(record.timer);
 		record.timer = scheduleTimer(function () {
 			record.timer = null;
@@ -31,7 +33,7 @@ function createLiveTavernViewModule(options) {
 		}, delay);
 	}
 	async function refresh(record) {
-		if (record.listeners.size === 0) return;
+		if (records.get(record.id) !== record || record.listeners.size === 0) return;
 		if (record.loading) { record.reloadRequested = true; return; }
 		record.loading = true;
 		if (record.state.view === null) publish(record, Object.assign({}, record.state, { phase: "loading", error: "" }));
@@ -42,6 +44,7 @@ function createLiveTavernViewModule(options) {
 			let load = null;
 			if (loadTimeoutMs > 0) {
 				controller = new AbortController();
+				record.controller = controller;
 				load = Promise.race([
 					Promise.resolve(options.load(record.id, { signal: controller.signal })),
 					new Promise(function (_resolve, reject) {
@@ -56,6 +59,7 @@ function createLiveTavernViewModule(options) {
 			let result = null;
 			try { result = await load; }
 			finally { if (deadlineTimer !== null) cancelTimer(deadlineTimer); }
+			if (records.get(record.id) !== record) return;
 			const view = result && result.view ? result.view : null;
 			if (pollWhileBusy && record.optimisticBusy && !shouldPoll(view)) {
 				schedule(record, 200);
@@ -77,6 +81,7 @@ function createLiveTavernViewModule(options) {
 			}
 		} finally {
 			record.loading = false;
+			record.controller = null;
 			if (record.reloadRequested) { record.reloadRequested = false; schedule(record, 0); }
 		}
 	}
@@ -87,7 +92,19 @@ function createLiveTavernViewModule(options) {
 			else schedule(record, 0);
 		});
 	}
+	function evict(sessionId) {
+		const record = records.get(String(sessionId || ""));
+		if (!record || record.listeners.size) return false;
+		records.delete(record.id);
+		if (record.timer !== null) cancelTimer(record.timer);
+		if (record.eviction !== null) cancelTimer(record.eviction);
+		if (record.watchdog !== null) stopWatchdog(record.watchdog);
+		if (record.controller) record.controller.abort();
+		return true;
+	}
+
 	return {
+		evict: evict,
 		getSnapshot: function (sessionId) { return recordFor(sessionId).state; },
 		setView: function (sessionId, view) {
 			const record = recordFor(sessionId);
@@ -99,15 +116,17 @@ function createLiveTavernViewModule(options) {
 				if (released) return;
 				released = true;
 				record.optimisticBusy = false;
-				invalidate(sessionId);
+				if (records.get(record.id) === record) invalidate(sessionId);
 			};
 		},
 		subscribe: function (sessionId, listener) {
 			const record = recordFor(sessionId);
+			if (record.eviction !== null) { cancelTimer(record.eviction); record.eviction = null; }
+			const firstSubscriber = record.listeners.size === 0;
 			record.listeners.add(listener);
 			listener(record.state);
-			schedule(record, 0);
-			if (record.watchdog === null) {
+			if (firstSubscriber) schedule(record, 0);
+			if (record.watchdog === null && (pollWhileBusy || idlePollIntervalMs > 0)) {
 				record.watchdog = startWatchdog(function () {
 					if (record.listeners.size > 0 && ((pollWhileBusy && shouldPoll(record.state.view)) || idlePollIntervalMs > 0)) void refresh(record);
 				}, watchdogIntervalMs);
@@ -115,6 +134,10 @@ function createLiveTavernViewModule(options) {
 			return function () {
 				record.listeners.delete(listener);
 				if (record.listeners.size === 0) {
+					if (cacheRetentionMs > 0 && record.eviction === null) record.eviction = scheduleTimer(function () {
+						record.eviction = null;
+						if (records.get(record.id) === record) evict(record.id);
+					}, cacheRetentionMs);
 					if (record.timer !== null) { cancelTimer(record.timer); record.timer = null; }
 					if (record.watchdog !== null) { stopWatchdog(record.watchdog); record.watchdog = null; }
 				}

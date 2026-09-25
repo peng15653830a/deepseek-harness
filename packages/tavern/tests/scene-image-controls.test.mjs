@@ -4,13 +4,14 @@ import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 
 const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
-const extract = (name, next) => source.slice(source.indexOf('function ' + name + '('), source.indexOf('function ' + next + '('))
+const extract = (name, next) => source.slice(source.indexOf((name === 'sceneImagePurchaseConfirmation' ? 'async ' : '') + 'function ' + name + '('), source.indexOf('function ' + next + '('))
 
 test('one repaint entry opens optional feedback; blank repaints and feedback adjusts without replacing old images', async () => {
   const slots = [], calls = []
   let cursor = 0, failure = false, requestId = 0
   const record = { key: 'turn-key', status: 'succeeded', enabled: true, versions: [{ id: 'old-picture' }] }
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {},
     React: {
       Fragment: 'fragment', createElement: (type, props, ...children) => ({ type, props, children }), useEffect() {},
@@ -57,6 +58,7 @@ test('image action is hidden until explicitly enabled, including loading and leg
   const slots = [], calls = []
   let cursor = 0
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {},
     React: {
       Fragment: 'fragment', createElement: (type, props, ...children) => ({ type, props, children }),
@@ -75,7 +77,7 @@ test('image action is hidden until explicitly enabled, including loading and leg
     assert.equal(render(), null, 'disabled or unknown settings leave no button or explanation')
   }
   for (const [settings, reason] of [
-    [{ enabled: true, ready: false, migrationPending: true }, /迁移.*保存并启用/],
+    [{ enabled: true, ready: false, migrationPending: true }, /迁移.*保存生图 API 配置/],
     [{ enabled: true, ready: false }, /配置未完成/]
   ]) {
     slots[0] = settings
@@ -94,6 +96,7 @@ test('image action is hidden until explicitly enabled, including loading and leg
 
 test('scene request identifiers also work on LAN HTTP without crypto.randomUUID', () => {
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {}, window: {} })
   const make = vm.runInContext(extract('sceneImageRequestId', 'sceneImageStageLabel') + ';sceneImageRequestId', context)
   const ids = Array.from({ length: 1000 }, make)
@@ -106,6 +109,7 @@ test('main image action preserves request ID on ambiguous transport errors and c
   let cursor = 0, fail = true
   const record = { key: 'target-key', status: 'idle', versions: [] }
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {},
     React: {
       Fragment: 'fragment', createElement: (type, props, ...children) => ({ type, props, children }),
@@ -136,6 +140,13 @@ test('main image action preserves request ID on ambiguous transport errors and c
   assert.ok(pending.children.includes('图片待保存'))
   await pending.props.onClick()
   assert.equal(calls.length, 2, 'must not send generation while bytes await saving')
+  delete record.recovery; record.status = 'idle'
+  fail = true; await render().children[0].props.onClick()
+  const oldRequest = calls.at(-1).args.requestId
+  // The request succeeded remotely, then its last picture was deleted elsewhere.
+  record.requestId = oldRequest; record.hasDeletedImages = true
+  fail = false; await render().children[0].props.onClick()
+  assert.notEqual(calls.at(-1).args.requestId, oldRequest, 'deletion must not reuse the completed request')
 })
 
 test('received image can be saved from the renderer while generation is disabled', async () => {
@@ -143,6 +154,7 @@ test('received image can be saved from the renderer while generation is disabled
   let cursor = 0
   const record = { key: 'frozen-key', requestId: 'original-image', status: 'failed', recovery: 'save', versions: [], enabled: false }
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {},
     React: { Fragment: 'fragment', createElement: (type, props, ...children) => ({ type, props, children }), useEffect() {},
       useState(initial) { const n = cursor++; if (!(n in slots)) slots[n] = initial; return [slots[n], value => { slots[n] = value }] },
@@ -168,17 +180,18 @@ test('received image can be saved from the renderer while generation is disabled
   assert.equal(calls[1].args.requestId, record.requestId)
 })
 
-test('uncertain purchase requires user confirmation, while original provider task queries do not', () => {
+test('uncertain purchase requires user confirmation, while original provider task queries do not', async () => {
   let accepts = false, prompts = 0
-  const context = vm.createContext({ window: { confirm: text => { assert.match(text, /可能已经计费.*再次产生费用/); prompts++; return accepts } } })
-  const confirm = vm.runInContext(extract('sceneImagePurchaseConfirmation', 'useSceneImageRecord') + ';sceneImagePurchaseConfirmation', context)
-  assert.equal(confirm({ outcome: 'not_requested' }), undefined)
-  assert.equal(confirm({ outcome: 'rejected' }), undefined)
-  assert.equal(confirm({ outcome: 'unconfirmed', providerTask: { promptId: 'existing' } }), undefined)
+  const context = vm.createContext({})
+  const purchase = vm.runInContext(extract('sceneImagePurchaseConfirmation', 'useSceneImageRecord') + ';sceneImagePurchaseConfirmation', context)
+  const confirm = record => purchase(record, async text => { assert.match(text, /可能已经计费.*再次产生费用/); prompts++; return accepts })
+  assert.equal(await confirm({ outcome: 'not_requested' }), undefined)
+  assert.equal(await confirm({ outcome: 'rejected' }), undefined)
+  assert.equal(await confirm({ outcome: 'unconfirmed', providerTask: { promptId: 'existing' } }), undefined)
   assert.equal(prompts, 0)
-  assert.equal(confirm({ outcome: 'unconfirmed', requestId: 'uncertain-original' }), false)
+  assert.equal(await confirm({ outcome: 'unconfirmed', requestId: 'uncertain-original' }), false)
   accepts = true
-  assert.equal(confirm({ outcome: 'unconfirmed', requestId: 'uncertain-original' }), 'uncertain-original')
+  assert.equal(await confirm({ outcome: 'unconfirmed', requestId: 'uncertain-original' }), 'uncertain-original')
   assert.equal(prompts, 2)
 })
 
@@ -186,6 +199,7 @@ test('ComfyUI file chooser stores the parsed graph only on explicit save and has
   const slots = [], calls = []
   let cursor = 0
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {},
     React: { createElement: (type, props, ...children) => ({ type, props, children }), useEffect() {}, useState(initial) { const n = cursor++; if (!(n in slots)) slots[n] = initial; return [slots[n], value => { slots[n] = typeof value === 'function' ? value(slots[n]) : value }] } },
     window: { dispatchEvent() {} }, CustomEvent: class {},
@@ -196,14 +210,13 @@ test('ComfyUI file chooser stores the parsed graph only on explicit save and has
   const render = () => { cursor = 0; return nodes(Component()) }
   render()
   slots[0] = { provider: 'comfyui', baseURL: 'http://localhost:8188', authType: 'none', username: '', workflow: null, style: { preset: 'default', custom: '' }, ready: false, channels: [{ id: 'comfyui', label: 'ComfyUI', fields: ['baseURL', 'authType', 'username'] }] }
-  await render().find(node => node.props?.role === 'switch').props.onChange({ target: { checked: true } })
   const file = render().find(node => node.type === 'input' && node.props.type === 'file')
   assert.ok(file)
   await file.props.onChange({ target: { files: [{ size: 80, text: async () => '{"1":{"class_type":"SaveImage","inputs":{}}}' }], value: 'file.json' } })
   assert.equal(calls.length, 0)
   assert.equal(slots[0].workflow['1'].class_type, 'SaveImage')
   assert.equal(render().filter(node => node.type === 'textarea').length, 1, 'only the optional style textarea')
-  await render().find(node => node.type === 'button' && node.children.includes('保存并启用')).props.onClick()
+  await render().find(node => node.type === 'button' && node.children.includes('保存生图 API 配置')).props.onClick()
   assert.equal(calls[0].method, 'saveSceneImageSettings')
   assert.equal(calls[0].args.workflow['1'].class_type, 'SaveImage')
   await file.props.onChange({ target: { files: [{ size: 512001 }], value: '' } })
@@ -215,6 +228,7 @@ test('setup order, read-only draft checks, model selection and stale status clea
   const slots = [], calls = []
   let cursor = 0
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {},
     React: { createElement: (type, props, ...children) => ({ type, props, children }), useEffect() {}, useState(initial) { const n = cursor++; if (!(n in slots)) slots[n] = initial; return [slots[n], value => { slots[n] = typeof value === 'function' ? value(slots[n]) : value }] } },
     window: { dispatchEvent() {} }, CustomEvent: class {},
@@ -225,7 +239,6 @@ test('setup order, read-only draft checks, model selection and stale status clea
   const render = () => { cursor = 0; return nodes(Component()) }
   render()
   slots[0] = { provider: 'openai', baseURL: 'https://example.test/v1', model: 'image-default', size: '1024x1024', style: { preset: 'default', custom: '' }, channels: [{ id: 'openai', fields: ['baseURL', 'model', 'size'], models: ['image-default'], canListModels: true }] }
-  await render().find(node => node.props?.role === 'switch').props.onChange({ target: { checked: true } })
   let tree = render()
   const labelIndex = name => tree.findIndex(node => node.type === 'label' && node.children[0] === name)
   const buttonIndex = name => tree.findIndex(node => node.type === 'button' && node.children.includes(name))
@@ -270,6 +283,7 @@ test('reference chooser never preselects a group member, freezes consent and per
     reference: { supported: true, service: 'Gemini local test', gateway: 'gateway-a', bindings: [] },
     versions: [{ id: 'picture', referencePeople: [{ id: 'left-id', name: '同名', description: '左侧黑发' }, { id: 'right-id', name: '同名', description: '右侧红发' }] }] }
   const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
     recordImageInteraction() {},
     React: { Fragment: 'fragment', createElement: (type, props, ...children) => ({ type, props, children }), useEffect() {},
       useState(initial) { const n = cursor++; if (!(n in slots)) slots[n] = initial; return [slots[n], value => { slots[n] = value }] },
@@ -356,4 +370,67 @@ test('native story replies render illustrations, while card mode and transitioni
   assert.equal(evaluate({ liveState: { view: { mode: 'card' } } }), null)
   assert.equal(evaluate({ sessionTransitioning: true }), null)
   assert.equal(evaluate({ storyTurn: 0 }), null)
+})
+
+test('missing scene target retries are bounded and recovery clears unavailable state', async () => {
+  let state, effect, timer, calls = 0, ready = false
+  const ctx = vm.createContext({
+    React: { useState: () => [null, value => { state = typeof value === 'function' ? value(state) : value }], useEffect: fn => { effect = fn } },
+    window: { clearTimeout() { timer = null }, setTimeout(fn) { timer = fn }, addEventListener() {}, removeEventListener() {} },
+    rpc: async () => { calls++; return { illustration: ready ? {status:'idle',key:'valid',versions:[]} : {status:'unavailable',reason:'target-unavailable',versions:[]} } }
+  })
+  const hook = vm.runInContext(extract('useSceneImageRecord', 'SceneImageAction') + ';useSceneImageRecord', ctx)
+  const tick = () => new Promise(resolve => setImmediate(resolve))
+  hook('session', 4); const cleanup = effect(); await tick()
+  while (timer) { const next = timer; timer = null; next(); await tick() }
+  assert.equal(calls, 6)
+  assert.equal(state.error, undefined)
+  cleanup(); ready = true; effect(); await tick()
+  assert.equal(state.key, 'valid')
+  assert.equal(timer, null)
+})
+
+test('delete selected image, handle cancellation/errors, then regenerate the empty historical turn', async () => {
+  const slots = [], calls = []
+  let cursor = 0, confirmed = false, failure = false, serial = 0
+  const record = { key: 'historical-turn', status: 'succeeded', enabled: false, versions: [{ id: 'first' }, { id: 'second' }] }
+  const context = vm.createContext({
+    useTavernConfirm: () => async () => true,
+    recordImageInteraction() {}, URLSearchParams, sceneImageStageLabel: () => '生成中',
+    React: { Fragment: 'fragment', createElement: (type, props, ...children) => ({ type, props, children }), useEffect() {},
+      useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = initial; return [slots[i], value => { slots[i] = value }] },
+      useRef(initial) { const i = cursor++; return slots[i] ||= { current: initial } } },
+    useSceneImageRecord: () => record, sceneImagePurchaseConfirmation: () => undefined, sceneImageRequestId: () => 'new-request-' + (++serial),
+    useTavernConfirm: () => async () => confirmed,
+    window: { dispatchEvent() {} }, CustomEvent: class {},
+    rpc: async (method, args, sessionId) => {
+      calls.push({ method, args, sessionId })
+      if (failure) throw Error('删除失败')
+      if (method === 'removeSceneImage') { record.versions = record.versions.filter(v => v.id !== args.versionId); record.hasDeletedImages = true; record.status = record.versions.length ? 'succeeded' : 'idle' }
+    }
+  })
+  const Component = vm.runInContext(extract('SceneIllustration', 'TavernAssistantNodeView') + ';SceneIllustration', context)
+  const nodes = tree => tree && typeof tree === 'object' ? [tree, ...(tree.children || []).flat(Infinity).flatMap(nodes)] : []
+  const render = () => { cursor = 0; return nodes(Component({ sessionId: 'session', turn: 3 })) }
+  const button = label => render().find(n => n.type === 'button' && n.children.includes(label))
+  await button('删除图片').props.onClick(); assert.equal(calls.length, 0)
+  confirmed = true; record.status = 'running'; assert.equal(button('删除图片').props.disabled, true)
+  record.status = 'succeeded'; record.recovery = 'save'; assert.equal(button('删除图片').props.disabled, true); delete record.recovery
+  failure = true; await button('删除图片').props.onClick()
+  assert.equal(record.versions.length, 2); assert.ok(render().some(n => n.props?.role === 'alert' && n.children.includes('删除失败')))
+  failure = false
+  await render().find(n => n.props?.['aria-label'] === '上一张插图').props.onClick()
+  await button('删除图片').props.onClick()
+  assert.equal(calls.at(-1).args.versionId, 'first')
+  assert.equal(record.versions[0].id, 'second')
+  await button('删除图片').props.onClick()
+  assert.equal(record.versions.length, 0)
+  assert.equal(button('重新生图'), undefined, 'generation stays unavailable while image service is disabled')
+  record.enabled = true
+  await button('重新生图').props.onClick()
+  assert.equal(calls.at(-1).method, 'generateSceneImage')
+  assert.equal(calls.at(-1).args.kind, 'generate')
+  assert.equal(calls.at(-1).args.turn, 3)
+  assert.equal(calls.at(-1).args.versionId, undefined)
+  assert.equal(calls.at(-1).sessionId, 'session')
 })

@@ -11,7 +11,7 @@ test('固定会话种子以 user assistant user 轨迹进入原生 Session', asy
 
   assert.deepEqual(session.deriveMessages().map(message => message.role), ['user', 'assistant', 'user'])
   assert.deepEqual(session.deriveMessages().map(message => message.content[0].text), sessionSeedTrajectoryMessages(session.id).map(message => message.text))
-  assert.deepEqual(result.events.map(event => event.seq), [0, 1, 2])
+  assert.deepEqual(result.events.map(event => event.seq), session.header.version >= 3 ? [1, 2, 3] : [0, 1, 2])
   assert.deepEqual(session.deriveMessages().map(message => message.source), [
     { kind: 'plugin', plugin: 'dsh-tavern', form: 'synthetic-trajectory', version: 1 },
     { kind: 'model', provider: 'dsh-tavern', model: 'synthetic-trajectory', version: 1 },
@@ -28,7 +28,7 @@ test('会话种子重建后保持幂等，不重复追加轨迹', async () => {
   const result = await ensureSessionSeedTrajectory(session)
 
   assert.deepEqual(sessionEvents(session).filter(event => event.type !== 'session/end-seed'), before)
-  assert.deepEqual(result.events.map(event => event.seq), [0, 1, 2])
+  assert.deepEqual(result.events.map(event => event.seq), session.header.version >= 3 ? [1, 2, 3] : [0, 1, 2])
 })
 
 test('会话种子可从自身尾部的部分写入继续，不覆盖或重复已有事件', async () => {

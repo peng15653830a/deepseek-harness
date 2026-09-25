@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import vm from 'node:vm'
+import { stubFrameDependencyImports } from './fixtures/frame-dependency-imports.mjs'
 
 const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
 
@@ -149,7 +150,7 @@ test('loading iframe defers updates without advancing its baseline and receives 
   const parent = { postMessage(data) { requests.push(data) } }
   const sandbox = { parent, console, structuredClone, addEventListener(type, run) { handlers[type] = run } }
   sandbox.window = sandbox
-  vm.runInNewContext(shim.replace(/import\("[^"]+"\)/, 'Promise.resolve({})'), sandbox)
+  vm.runInNewContext(stubFrameDependencyImports(shim), sandbox)
   let displayed = '未系'
   sandbox.eventOn(sandbox.Mvu.events.VARIABLE_UPDATE_ENDED, () => {
     displayed = sandbox.Mvu.getMvuData({ type: 'message', message_id: 'latest' }).stat_data.安全带
@@ -205,7 +206,7 @@ test('snapshot recovery refreshes event-driven MVU view after installing state, 
   const sandbox = { parent, console, structuredClone, addEventListener(type, run) { handlers[type] = run } }
   sandbox.window = sandbox
   // Dependency import is unrelated to this transport; use the real shim otherwise.
-  vm.runInNewContext(shim.replace(/import\("[^"]+"\)/, 'Promise.resolve({})'), sandbox)
+  vm.runInNewContext(stubFrameDependencyImports(shim), sandbox)
   const displayed = []
   let received = 0
   sandbox.eventOn(sandbox.Mvu.events.VARIABLE_UPDATE_ENDED, () => displayed.push(sandbox.Mvu.getMvuData({ type: 'message', message_id: 'latest' }).stat_data.安全带))

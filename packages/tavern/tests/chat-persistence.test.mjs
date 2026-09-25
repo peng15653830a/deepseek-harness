@@ -1,3 +1,4 @@
+import { createHistoryRecall } from '../tavern-plugin/lib/domain/history-recall.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -250,4 +251,92 @@ test('两个写入者删除不同字段时都生效，不产生 undefined 字段
   await app.persistence.write(second)
   assert.deepEqual(app.stored().state, { keep: null })
   assert.deepEqual(Object.keys(app.stored().state), ['keep'])
+})
+
+test('journal 的过期写入按需读取持久版本，不长期保留每轮完整副本', async t => {
+  const root=await mkdtemp(join(tmpdir(),'chat-baseline-'))
+  t.after(()=>rm(root,{recursive:true,force:true}))
+  const store=createChatJournalStore({dataRoot:root})
+  let baselineReads=0
+  const persistence=createChatPersistence({store:{...store,readRevision:async(...args)=>{baselineReads++;return store.readRevision(...args)}}})
+  await persistence.write({id:'c',messages:[message()],counter:0})
+  const old=await persistence.read('c')
+  for(let i=0;i<12;i++)await persistence.update('c',c=>{c.counter++;return c})
+  old.extra='并发无关改动'
+  await persistence.write(old)
+  assert.equal(baselineReads,1)
+  const saved=await persistence.read('c')
+  assert.equal(saved.counter,12)
+  assert.equal(saved.extra,old.extra)
+  const a=await persistence.read('c'),b=await persistence.read('c')
+  a.counter++;b.counter+=2
+  await persistence.write(a)
+  await assert.rejects(persistence.write(b),error=>error.code==='DSH_TAVERN_CHAT_CONFLICT')
+})
+
+for (const anotherToggle of [false, true]) test('复用已合并的草稿不会撤销隐藏状态或产生伪冲突：' + anotherToggle, async () => {
+  const app = harness({ id: 'chat-1', messages: [], hiddenDshErrorTurns: [], _storageRevision: 1 })
+  const draft = await app.persistence.read('chat-1')
+  await app.persistence.update('chat-1', current => ({ ...current, hiddenDshErrorTurns: [1] }))
+  draft.foregroundError = { turn: 2 }
+  await app.persistence.write(draft)
+  if (anotherToggle) await app.persistence.update('chat-1', current => ({ ...current, hiddenDshErrorTurns: [1, 2] }))
+  draft.foregroundError = { turn: 3 }
+  await app.persistence.write(draft)
+  assert.deepEqual(app.stored().hiddenDshErrorTurns, anotherToggle ? [1, 2] : [1])
+})
+
+test('保存合并同步嵌套字段和删除，同时保留草稿已有对象引用', async () => {
+  const app = harness({ id: 'chat-1', settings: { old: 1, local: 0 }, _storageRevision: 1 })
+  const draft = await app.persistence.read('chat-1'), settings = draft.settings
+  await app.persistence.update('chat-1', current => { delete current.settings.old; current.settings.remote = 2; return current })
+  draft.settings.local = 1
+  await app.persistence.write(draft)
+  assert.equal(draft.settings, settings)
+  assert.deepEqual(settings, { local: 1, remote: 2 })
+  settings.local = 3
+  await app.persistence.write(draft)
+  assert.deepEqual(app.stored().settings, { local: 3, remote: 2 })
+})
+
+test('保存等待期间的新编辑不被合并结果覆盖', async () => {
+  const app = harness({ id: 'chat-1', settings: { local: 0, remote: 0 }, _storageRevision: 1 })
+  const draft = await app.persistence.read('chat-1')
+  await app.persistence.update('chat-1', current => { current.settings.remote = 2; return current })
+  draft.settings.local = 1
+  const pending = app.persistence.write(draft)
+  draft.settings.local = 3
+  await pending
+  assert.deepEqual(draft.settings, { local: 3, remote: 2 })
+  await app.persistence.write(draft)
+  assert.deepEqual(app.stored().settings, { local: 3, remote: 2 })
+})
+
+test('批量隐藏与单条恢复并发时按顺序保留最新选择及剧情', async () => {
+  const { setAllFailedErrorVisibility, setFailedErrorVisibility } = await import('../tavern-plugin/lib/domain/failed-error-visibility.js')
+  const app = harness({ id: 'chat-1', messages: [{ text: '正文' }], hiddenDshErrorTurns: [], _storageRevision: 1 })
+  const events = [1, 2].map(turn => ({ type: 'turn/end', data: { turn, reason: { kind: 'error' } } }))
+  await Promise.all([
+    app.persistence.update('chat-1', chat => setAllFailedErrorVisibility(chat, events, true).chat),
+    app.persistence.update('chat-1', chat => setFailedErrorVisibility(chat, events, 1, false))
+  ])
+  assert.deepEqual(app.stored().hiddenDshErrorTurns, [2])
+  assert.deepEqual(app.stored().messages, [{ text: '正文' }])
+})
+
+
+test('前后台并发召回分别冷却且不覆盖彼此记录或剧情', async () => {
+  const app = harness({ id: 'chat-1', messages: [message()], _storageRevision: 1 })
+  const results = await Promise.all(Array.from({ length: 20 }, async (_, index) => {
+    let result
+    await app.persistence.update('chat-1', current => {
+      result = createHistoryRecall().recall({ chat: current, turn: 1, radius: 0, trackCooldown: true, audience: index % 2 ? 'background' : 'foreground' })
+      return current
+    }, { source: 'history-recall', touchUpdatedAt: false })
+    return result
+  }))
+  assert.equal(results.filter(result => result.rounds.length === 1).length, 2)
+  const restored = await app.persistence.read('chat-1')
+  assert.deepEqual(restored.messages, [message()])
+  assert.equal(restored.historyRecallCooldowns.length, 2)
 })

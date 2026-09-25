@@ -1,6 +1,7 @@
+import { execFileSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { helperClient, helperHostHarness } from './fixtures/helper-host-harness.mjs'
@@ -152,8 +153,11 @@ test('记录落盘回读、去重、容量限制、Session 隔离与日志包导
     assert.equal(saved.records[2].result, 'rejected')
     const exported = await createMvuDiagnosticExport({ sessionId: 's1', store: createMvuDiagnosticStore(storage), compatibilityDiagnostics: saved })
     assert.match(exported.buffer.toString(), /compatibility\/missing-capabilities.json/)
-    assert.match(exported.buffer.toString(), /runtime-current-script/)
-    assert.doesNotMatch(exported.buffer.toString(), /PRIVATE_CHAT/)
+    const archive = join(directory, 'diagnostics.zip')
+    await writeFile(archive, exported.buffer)
+    const unpacked = execFileSync('unzip', ['-p', archive, 'compatibility/missing-capabilities.json'], { encoding: 'utf8' })
+    assert.match(unpacked, /runtime-current-script/)
+    assert.doesNotMatch(unpacked, /PRIVATE_CHAT/)
     await store.record('s1', 'r2', [call, { ...call, capabilityId: 'PRIVATE_CHAT' }])
     saved = await store.read('s1')
     assert.equal(saved.records.length, 3)

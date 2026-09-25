@@ -83,10 +83,12 @@ test('脚本执行模块按 Helper Runtime 的真实检查结构报告 MVU 已�
   assert.equal(client.tavernScriptRuntimeReady(inspection), true)
 })
 
-test('长消息限制在 1200px 内并由 iframe 原生滚动', () => {
+test('长消息按内容展开，异常高度保留安全上限', () => {
   assert.equal(client.clampTavernFrameHeight(48), 48)
   assert.equal(client.clampTavernFrameHeight(1200), 1200)
-  assert.equal(client.clampTavernFrameHeight(5000), 1200)
+  assert.equal(client.clampTavernFrameHeight(5000), 5000)
+  assert.equal(client.clampTavernFrameHeight(90000), 32000)
+  assert.equal(client.clampTavernFrameHeight(Infinity), 48)
   const documentHtml = client.buildTavernFrameDocument({ content: '正文', token: 'native-scroll-token' })
   assert.doesNotMatch(documentHtml, /dsh-tavern-touch-bridge|dsh-tavern-frame-pan/)
 })
@@ -277,7 +279,7 @@ test('消息界面的 /send …|/trigger 通过当前 composer 提交并等待�
   listeners.forEach(listener => listener())
   assert.deepEqual(JSON.parse(JSON.stringify(await completed)), { submitted: true })
   assert.equal(listeners.size, 0)
-  await assert.rejects(execute('/compact', 'session-magic-fairy'), /只允许调用/)
+  await assert.rejects(execute('/compact', 'session-magic-fairy'), /没有注册这条命令/)
 })
 
 test('大凉入局按钮的带空格管道发送开局消息', async () => {
@@ -306,7 +308,7 @@ test('大凉入局按钮的带空格管道发送开局消息', async () => {
   listeners.forEach(listener => listener())
   assert.deepEqual(JSON.parse(JSON.stringify(await completed)), { submitted: true })
   assert.equal(listeners.size, 0)
-  await assert.rejects(execute('/compact', 'session-magic-fairy'), /只允许调用/)
+  await assert.rejects(execute('/compact', 'session-magic-fairy'), /没有注册这条命令/)
 })
 
 test('消息 iframe 首次缺少 Helper Context 时，在上下文抵达后重建为可交互文档', () => {
@@ -393,7 +395,7 @@ test('Helper Context 首次快照后只发送消息和变量增量', () => {
 test('变量回执区分后台结算中和过期结果', function () {
   assert.match(clientSource, /pending:\s*"变量结算中…"/)
   assert.match(clientSource, /stale:\s*"变量结算已过期，未覆盖当前状态"/)
-  assert.match(clientSource, /rpc\("retrySettlement", \{ turn: props\.turn \}, props\.sessionId\)/)
+  assert.match(clientSource, /rpc\("retrySettlement", \{ turn: props\.turn, guidance \}, props\.sessionId\)/)
   assert.match(clientSource, /"重试变量结算"/)
 })
 
@@ -492,9 +494,15 @@ test('人物卡挂到宿主 Shadow DOM 的 Font Awesome 样式改用内置资源
     get() { return this.value || '' },
     set(value) { this.value = String(value) }
   })
-  const hostWindow = { HTMLLinkElement: FakeLink }
+  const links = [];
+  const hostWindow = { HTMLLinkElement: FakeLink, document: {
+    head: { appendChild(node) { links.push(node) } },
+    createElement() { const node = new FakeLink(); node.setAttribute = () => {}; node.remove = () => { links.splice(links.indexOf(node), 1) }; return node }
+  } }
   const disposeFirst = client.createTavernHostStylesheetBridge({ window: hostWindow })
   const disposeSecond = client.createTavernHostStylesheetBridge({ window: hostWindow })
+  assert.equal(links.length, 1, 'shared runtime installs one host stylesheet');
+  assert.equal(links[0].href, '/api/dsh-tavern/vendor/runtime-assets/fontawesome/css/all.min.css');
   const phoneIcons = new FakeLink()
   phoneIcons.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css'
   assert.equal(phoneIcons.href, '/api/dsh-tavern/vendor/runtime-assets/fontawesome/css/all.min.css')
@@ -504,10 +512,12 @@ test('人物卡挂到宿主 Shadow DOM 的 Font Awesome 样式改用内置资源
   assert.equal(unrelated.href, 'https://example.test/card-theme.css')
 
   disposeFirst()
+  assert.equal(links.length, 1, 'other runtime still needs host icons');
   const shared = new FakeLink()
   shared.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css'
   assert.equal(shared.href, '/api/dsh-tavern/vendor/runtime-assets/fontawesome/css/all.min.css')
   disposeSecond()
+  assert.equal(links.length, 0, 'last owner removes host stylesheet');
 
   const restored = new FakeLink()
   restored.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css'
@@ -680,7 +690,7 @@ test('官方 MVU owner 作为共享沙箱首个系统模块本地加载', () => 
   assert.equal(frames.length, 1)
   assert.match(frames[0].srcdoc, /"officialMvu":true/)
   assert.ok(frames[0].srcdoc.indexOf('__dsh_official_mvu__') < frames[0].srcdoc.indexOf('guard'))
-  const loaderUrl = frames[0].srcdoc.match(/<script type="module" src="data:text\/javascript;base64,([^"]+)"/)[1]
+  const loaderUrl = frames[0].srcdoc.match(/data:text\/javascript;base64,([^"]+)"/)[1]
   const loader = Buffer.from(loaderUrl, 'base64').toString('utf8')
   const modules = JSON.parse(loader.match(/const scripts=(\[[^\n]*\]);\n/)[1])
   assert.equal(modules[0].assetUrl, '/api/dsh-tavern/vendor/magvarupdate/bundle.js')
@@ -733,7 +743,15 @@ test('消息 iframe 清理完整 HTML 文档泄漏到正文层的顶级排版空
   const nestedWhitespace = { nodeType: 3, nodeValue: '\n保留', parentNode: {} }
   const body = { childNodes: [topLevelWhitespace, inlineSpace, meaningfulText] }
   nestedWhitespace.parentNode = { childNodes: [nestedWhitespace] }
-  vm.runInNewContext(normalizer[1], { document: { body }, Array })
+  let onMutation
+  vm.runInNewContext(normalizer[1], { document: { body }, Array,
+    MutationObserver: class { constructor(fn) { onMutation = fn } observe(target, options) { assert.equal(target, body); assert.equal(options.childList, true) } disconnect() {} },
+    addEventListener() {}
+  })
+  const loadedWhitespace = { nodeType: 3, nodeValue: '\n    ' }
+  body.childNodes.push(loadedWhitespace)
+  onMutation()
+  assert.equal(loadedWhitespace.nodeValue, '')
 
   assert.equal(topLevelWhitespace.nodeValue, '')
   assert.equal(inlineSpace.nodeValue, ' ')
@@ -892,8 +910,8 @@ test('官方 MVU 与人物卡脚本共用沙箱时仍先提供全局 Zod 与 YAM
   const loader = Buffer.from(encoded[1], 'base64').toString('utf8')
 
   assert.match(document, /const officialMvuEnabled = metadata\.officialMvu === true/)
-  assert.match(document, /import\("\/api\/dsh-tavern\/vendor\/runtime-assets\/zod\/index\.mjs"\)/)
-  assert.match(document, /import\("\/api\/dsh-tavern\/vendor\/runtime-assets\/yaml\/index\.mjs"\)/)
+  assert.match(document, /import\(new URL\("\/api\/dsh-tavern\/vendor\/runtime-assets\/zod\/index\.mjs",document\.baseURI\)\.href\)/)
+  assert.match(document, /import\(new URL\("\/api\/dsh-tavern\/vendor\/runtime-assets\/yaml\/index\.mjs",document\.baseURI\)\.href\)/)
   assert.match(document, /window\.z = modules\[0\]/)
   assert.match(document, /window\.YAML = modules\[1\]/)
   assert.doesNotMatch(document, /officialMvuEnabled\s*\?\s*Promise\.resolve/)
@@ -1174,7 +1192,7 @@ test('Helper Host 生命周期事件保留官方 MVU 识别角色回复所需的
   runtime.dispose()
 })
 
-test('Helper Host 超时会指出正在执行的脚本、拒绝事件并屏蔽迟到写入', async () => {
+test('Helper Host 失联会指出正在执行的脚本、关闭事件并屏蔽迟到写入', async () => {
   const windowListeners = new Map()
   const frames = []
   const errors = []
@@ -1231,7 +1249,7 @@ test('Helper Host 超时会指出正在执行的脚本、拒绝事件并屏蔽�
     data: { type: 'dsh-tavern-helper-event-progress', token: 'timeout-runtime-token', eventId: request.eventId, scriptId: 'guard', phase: 'started' }
   })
 
-  await assert.rejects(emitted, /变量守卫.*MESSAGE_RECEIVED.*超时/)
+  await assert.rejects(emitted, /变量守卫.*MESSAGE_RECEIVED.*失联/)
   assert.deepEqual(errors.map(item => item.source), ['人物卡脚本「变量守卫」'])
 
   receive({
@@ -1742,7 +1760,7 @@ test('收起的 details 隐藏内容不撑高 iframe，展开后恢复测高', (
   })
   run(); assert.equal(height, 48); assert.equal(scrollEnabled, false)
   details.open = true
-  run(); assert.equal(height, 3656); assert.equal(scrollEnabled, true)
+  run(); assert.equal(height, 3656); assert.equal(scrollEnabled, false)
   assert.match(html, /html\[data-dsh-tavern-scroll\]\{overflow-y:auto!important\}/)
   assert.match(html, /html\[data-dsh-tavern-scroll\] body\{overflow-y:visible!important\}/)
 })
@@ -1824,7 +1842,7 @@ test('frame slash requests reject promptly when generation is unavailable instea
   }
 })
 
-test('Host acknowledgements extend idle waits but cannot extend the total event deadline', async () => {
+test('Host acknowledgements confirm liveness without imposing a total event deadline', async () => {
   const windowListeners = new Map()
   const frames = []
   const errors = []
@@ -1893,8 +1911,9 @@ test('Host acknowledgements extend idle waits but cannot extend the total event 
     data: { type: 'dsh-tavern-helper-event-progress', token: 'timeout-runtime-token', eventId: request.eventId, scriptId: 'guard', phase: 'started' }
   })
 
-  const rejected = assert.rejects(emitted, /MESSAGE_RECEIVED.*超时/)
-  for (const at of [20, 40, 60, 80]) {
+  let finished = false
+  const done = emitted.then(args => { finished = true; return args })
+  for (const at of [20, 40, 60, 80, 100, 120]) {
     advance(at)
     receive({ source: frames[0].contentWindow, data: {
       type: 'dsh-tavern-helper-call', token: 'timeout-runtime-token', eventId: request.eventId,
@@ -1903,19 +1922,22 @@ test('Host acknowledgements extend idle waits but cannot extend the total event 
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(errors.length, 0)
   }
-  advance(99)
+  advance(139)
   assert.equal(errors.length, 0)
-  advance(100)
-  await rejected
-  assert.equal(errors.length, 1)
-  assert.equal(rpcCalls.length, 4)
+  assert.equal(finished, false)
+  receive({ source: frames[0].contentWindow, data: {
+    type: 'dsh-tavern-helper-event-complete', token: 'timeout-runtime-token', eventId: request.eventId, args: [2]
+  } })
+  assert.deepEqual(Array.from(await done), [2])
+  assert.equal(errors.length, 0)
+  assert.equal(rpcCalls.length, 6)
   runtime.dispose()
 })
 
 test('trusted scripts await host jQuery before executing; isolated scripts do not access host', () => {
   for (const trustedCardMode of [true, false]) {
     const document = client.buildTavernHelperScriptDocument({ trustedCardMode, scripts: [{ id: 'ball', content: 'void 0' }] });
-    const loader = Buffer.from(document.match(/<script type="module" src="data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString();
+    const loader = Buffer.from(document.match(/data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString();
     assert.equal(loader.includes('await ensureHostJQuery(window.parent)'), trustedCardMode);
     if (trustedCardMode) assert.ok(loader.indexOf('await ensureHostJQuery(window.parent)') < loader.indexOf('for(const script of scripts)'));
   }
@@ -1990,7 +2012,7 @@ test('trusted script UI uses host body and its installed draggable; isolation re
     const window = { parent: { jQuery: hostJQuery }, $: localJQuery, jQuery: localJQuery,
       __dshTavernHelperReady: Promise.resolve(), addEventListener() {}, __dshTavernResolveCompanionScriptsReady() {} }
     const document = client.buildTavernHelperScriptDocument({ trustedCardMode, scripts: [] })
-    const loader = Buffer.from(document.match(/<script type="module" src="data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString()
+    const loader = Buffer.from(document.match(/data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString()
     await vm.runInNewContext('(async()=>{' + loader + '})()', { window })
     assert.equal(window.$('body'), trustedCardMode ? hostBody : localBody)
     if (trustedCardMode) assert.equal(typeof window.$.fn.draggable, 'function')
@@ -2031,7 +2053,7 @@ test('trusted opening exposes live MVU and EJS to original parent-window checks'
       addEventListener(name, handler) { events[name] = handler },
       __dshTavernResolveCompanionScriptsReady() {} }
     const html = client.buildTavernFrameDocument({ trustedCardMode, openingPreview: { runtime: { context: {}, scripts: [] } } })
-    const loader = Buffer.from(html.match(/<script type="module" src="data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString()
+    const loader = Buffer.from(html.match(/data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString()
     await vm.runInNewContext('(async()=>{' + loader + '})()', { window: frame })
     const bridge = html.match(/<script data-dsh-tavern-opening-host>([\s\S]*?)<\/script>/)
     if (bridge) vm.runInNewContext(bridge[1], { window: frame })
@@ -2064,7 +2086,7 @@ test('preparation host APIs retain priority over a background session runtime', 
 
 test('managed MVU keeps jQuery when a card declares its own lexical dollar helper', async () => {
   const html = client.buildTavernHelperScriptDocument({ scripts: [] })
-  const loader = Buffer.from(html.match(/<script type="module" src="data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString()
+  const loader = Buffer.from(html.match(/data:text\/javascript;base64,([^"]+)"/)[1], 'base64').toString()
   const source = loader.slice(loader.indexOf('const loadModule=') + 17, loader.indexOf(';\nconst createMvuLoader='))
   const sandbox = { window: { jQuery: callback => callback(), addEventListener() {}, removeEventListener() {} }, document: {
     getElementById: () => null,
@@ -2086,10 +2108,11 @@ test('opening refresh submits the same preparation draft that its iframe writes'
   const response = { preparationId: 'new-draft', trustedCardMode: true, openings: [
     { id: 'alternate:0', openingPreview: { preparationId: 'new-draft' } }, { id: 'primary' }
   ] }
-  const refresh = vm.runInNewContext('(function(current){' + updater + '})', { response, cardPath: 'card.json', userName: '你' })
+  const refresh = vm.runInNewContext('(function(current){' + updater + '})', { response, cardPath: 'card.json', userName: '你', preparedKey: '["你","dsh"]' })
   const next = refresh({ card: { path: 'card.json' }, userName: '你', preparationId: 'old-draft', index: 1, openings: [{ id: 'primary' }, { id: 'alternate:0' }] })
   assert.equal(next.openings[next.index].id, 'alternate:0')
   assert.equal(next.preparationId, next.openings[next.index].openingPreview.preparationId)
+  assert.equal(next.preparedKey, '["你","dsh"]')
 })
 
 test('pending opening frame can initialize its private MVU draft before becoming visible', async () => {
@@ -2176,4 +2199,78 @@ test('initializeGlobal publishes the value before waking existing global waiters
   await window.initializeGlobal('Controller', value)
   assert.equal(await waiting, value)
   assert.equal(await window.waitGlobalInitialized('Controller'), value)
+})
+
+test('frame setinput updates the owning session draft without submitting', async () => {
+  const writes = []
+  const ctx = { sessions: { scope: id => ({ id }) }, get: () => ({ input: { for: scope => ({ setDraft: text => writes.push([scope.id, text]), submit: assert.fail }) } }) }
+  const execute = client.createTavernFrameSlashExecutor(ctx, {})
+  await execute('/setinput 开场\n| /trigger', 'opening')
+  assert.deepEqual(writes, [['opening', '开场\n| /trigger']])
+})
+test('trusted parent toastr survives a card forwarding its local toastr to parent', () => {
+  const host = {}, notices = [], toast = { success: text => notices.push(text) }, frame = { toastr: toast }
+  const release = client.installTavernTrustedHostFacade(host, frame)
+  Object.defineProperty(frame, 'toastr', { get: () => host.toastr })
+  frame.toastr.success('已写入')
+  assert.deepEqual(notices, ['已写入'])
+  release()
+  assert.equal(Object.hasOwn(host, 'toastr'), false)
+})
+
+test('Helper 增量不遍历未变历史，替换、追加与截断保留旧状态', () => {
+  const untouched = { message_id: 0, get variables() { throw new Error('不应读取未变历史变量') } }
+  const previous = { stateRevision: 1, messages: [untouched, { variables: { hp: 10 } }], chatVariables: { location: 'old' } }
+  const value = { variables: { hp: 9 } }
+  const appended = { variables: { hp: 8 } }
+  const patch = { version: 1, kind: 'patch', baseRevision: 1, stateRevision: 2, operations: [
+    { op: 'message.replace', index: 1, value }, { op: 'messages.append', values: [appended] },
+    { op: 'value.replace', key: 'chatVariables', value: { location: 'new' } }
+  ] }
+  const next = client.applyTavernHelperContextUpdate(previous, patch).context
+  assert.equal(next.messages[0], untouched)
+  assert.equal(previous.messages.length, 2)
+  assert.equal(previous.messages[1].variables.hp, 10)
+  assert.equal(previous.chatVariables.location, 'old')
+  value.variables.hp = 0; appended.variables.hp = 0
+  assert.equal(next.messages[1].variables.hp, 9)
+  assert.equal(next.messages[2].variables.hp, 8)
+  const truncated = client.applyTavernHelperContextUpdate(next, { version: 1, kind: 'patch', baseRevision: 2, stateRevision: 3, operations: [{ op: 'messages.truncate', length: 1 }] }).context
+  assert.equal(truncated.messages.length, 1)
+  assert.equal(next.messages.length, 3)
+})
+
+
+test('模板内生成命令在提交后返回，不占住模板队列等待下一轮', async () => {
+  const calls=[]
+  const ctx={sessions:{scope:()=>({}),binding:()=>({session:{prompt:async()=>({ok:true})}})},get:()=>({input:{for:()=>({setDraft:text=>calls.push(text),submit:mode=>calls.push(mode)})}})}
+  const execute=client.createTavernFrameSlashExecutor(ctx,{setTimeout,clearTimeout})
+  assert.equal((await execute('/send 下一步|/trigger','game',{waitForCompletion:false})).submitted,true)
+  assert.deepEqual(calls,['下一步','queue'])
+  assert.equal((await execute('/trigger','game',{waitForCompletion:false})).submitted,true)
+})
+
+
+test('unsupported card pipelines fail before draft mutation or generation', async () => {
+  const calls = []
+  const ctx = { sessions: { scope: () => ({}) }, get: () => ({ input: { for: () => ({ setDraft: x => calls.push(x), submit: () => calls.push('submit') }) } }), remote: { commands: { execute: async () => { calls.push('remote'); return {} } } } }
+  const execute = client.createTavernFrameSlashExecutor(ctx, { setTimeout, clearTimeout })
+  for (const command of ['/cut', '/unknown']) {
+    await assert.rejects(execute(`/send 创建结果 | ${command} 0 | /trigger`, 'game', { waitForCompletion: false }), error => error.code === 'UNSUPPORTED_SLASH_PIPELINE' && error.message.includes(command))
+  }
+  await assert.rejects(execute('/cut 0', 'game'), /未发送消息/ )
+  assert.deepEqual(calls, [])
+})
+
+test('保留多个正式会话时，parent.Mvu 随当前会话切换而不是最后创建的沙箱', () => {
+  const host = { __dshTavernSelectedSessionId: 'A' }
+  const a = { frameElement: { __dshTavernSessionId: 'A' }, Mvu: { owner: 'A' } }
+  const b = { frameElement: { __dshTavernSessionId: 'B' }, Mvu: { owner: 'B' } }
+  const releaseA = client.installTavernTrustedHostFacade(host, a)
+  const releaseB = client.installTavernTrustedHostFacade(host, b)
+  assert.equal(host.Mvu, a.Mvu)
+  host.__dshTavernSelectedSessionId = 'B'; assert.equal(host.Mvu, b.Mvu)
+  host.__dshTavernSelectedSessionId = 'A'; assert.equal(host.Mvu, a.Mvu)
+  releaseB(); assert.equal(host.Mvu, a.Mvu)
+  releaseA(); assert.equal(host.Mvu, undefined)
 })

@@ -1,3 +1,4 @@
+import { zipText } from './fixtures/zip-text.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSceneImageDiagnostics, redactSceneDiagnostic } from '../tavern-plugin/lib/domain/scene-image-diagnostics.js'
@@ -93,7 +94,7 @@ test('same log ZIP contains scene attempts and their native subagent without rea
     persistence: { async readRaw(id) { read.push(id); return { content: JSON.stringify({ type: 'session', id }) } } },
     attachments: { readImage() { assert.fail('scene image bytes must not be included') } } })
   assert.deepEqual(read, ['parent', 'image-child'])
-  const text = result.buffer.toString('utf8')
+  const text = zipText(result.buffer)
   assert.match(text, /scene-images\/diagnostics.json/)
   assert.match(text, /subagents\/image-child\/session.jsonl/)
   assert.match(text, /雨中车站/)
@@ -116,4 +117,106 @@ test('provider observers report actual POST, download, IDs and timing but no aut
   let requests = 0
   await assert.rejects(generateSceneImage({ ...input, onProviderRequest() { throw Error('diagnostic disk full') } }, { fetch: async () => { requests++; return new Response('', { status: 503 }) } }), error => error.imageOutcome === 'unconfirmed')
   assert.equal(requests, 1)
+})
+
+test('progress writes only the active attempt and a small index, while reading preserves the public log', async () => {
+  const disk = storage(), logs = createSceneImageDiagnostics(disk)
+  for (let n = 0; n < 50; n++) await logs.record('chat', { ...attempt(n), details: { prompt: 'x'.repeat(10000) } })
+  let transferred = 0
+  const update = disk.updateJson
+  disk.updateJson = async (path, updater) => {
+    transferred += Buffer.byteLength(JSON.stringify(disk.values.get(path) || null))
+    const result = await update(path, updater)
+    transferred += Buffer.byteLength(JSON.stringify(result || null))
+    return result
+  }
+  for (let n = 0; n < 20; n++) await logs.record('chat', { ...attempt(49, 'step-' + n), details: { prompt: 'x'.repeat(10000) } })
+  assert.ok(transferred < 2000000, 'progress must not rewrite all 50 attempt bodies: ' + transferred)
+  const result = await createSceneImageDiagnostics(disk).read('chat')
+  assert.equal(result.version, 1)
+  assert.equal(result.records.length, 50)
+  assert.equal(result.records.at(-1).events.length, 21)
+  assert.equal(result.records[0].details.prompt.length, 10000)
+})
+
+test('legacy logs remain readable when migration publication fails, then migrate without losing history', async () => {
+  const { createHash } = await import('node:crypto')
+  const disk = storage()
+  const path = 'diagnostics/scene-' + createHash('sha256').update('chat').digest('hex') + '.json'
+  const legacy = { version: 1, chatId: 'chat', dropped: 3, records: [{ ...attempt(1), events: [{ at: 1, stage: 'planning', status: 'running' }] }] }
+  disk.values.set(path, structuredClone(legacy))
+  const logs = createSceneImageDiagnostics(disk)
+  assert.deepEqual(await logs.read('chat'), legacy)
+  const update = disk.updateJson
+  let fail = true
+  disk.updateJson = async (file, updater) => {
+    if (file === path && fail) { await updater(structuredClone(disk.values.get(file))); throw new Error('index failure') }
+    return update(file, updater)
+  }
+  await assert.rejects(logs.record('chat', attempt(2)), /index failure/)
+  assert.deepEqual(await logs.read('chat'), legacy)
+  fail = false
+  await logs.record('chat', attempt(2))
+  const restored = await createSceneImageDiagnostics(disk).read('chat')
+  assert.equal(restored.dropped, 3)
+  assert.deepEqual(restored.records[0], legacy.records[0])
+  assert.equal(restored.records[1].requestId, 'request-2')
+  assert.equal(disk.values.get(path).version, 2)
+})
+
+test('retention removes evicted detail files and retries failed cleanup without losing live attempts', async () => {
+  const disk = storage(), logs = createSceneImageDiagnostics(disk)
+  let failRemoval = true
+  disk.remove = async path => { if (failRemoval) throw Error('busy'); disk.values.delete(path) }
+  for (let n = 0; n < 25; n++) await logs.record('chat', { ...attempt(n), details: { prompt: 'x'.repeat(100000) } })
+  const before = await logs.read('chat')
+  assert.ok(before.dropped > 0)
+  assert.ok(Buffer.byteLength(JSON.stringify(before)) < 2 * 1024 * 1024)
+  const evicted = 0
+  // Reintroduce an evicted identity while failed removals remain pending.
+  await logs.record('chat', attempt(evicted, 'revived'))
+  failRemoval = false
+  await logs.record('chat', attempt(24, 'latest'))
+  const result = await logs.read('chat')
+  assert.equal(result.records.find(row => row.requestId === 'request-0').stage, 'revived')
+  assert.equal(disk.values.size, result.records.length + 1)
+  assert.ok(result.records.every(row => !row.unavailable))
+})
+
+test('two diagnostic writers serialize updates through the durable index and preserve per-attempt events', async t => {
+  const { createProfileDataStore } = await import('../tavern-plugin/lib/profile-data-store.js')
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = await mkdtemp(join(tmpdir(), 'scene-diag-concurrent-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const disk = createProfileDataStore({ dataRoot: root })
+  const first = createSceneImageDiagnostics(disk), second = createSceneImageDiagnostics(disk)
+  await Promise.all(Array.from({ length: 12 }, (_, n) => (n % 2 ? first : second).record('chat', attempt(1, 'phase-' + n))))
+  const read = await second.read('chat')
+  assert.equal(read.records.length, 1)
+  assert.equal(read.records[0].events.length, 12)
+  assert.equal(new Set(read.records[0].events.map(event => event.stage)).size, 12)
+  await second.record('chat', { ...attempt(1), targetKey: 'other-target' })
+  assert.equal((await first.read('chat')).records.length, 2)
+})
+
+test('failed detail writes leave existing logs readable; missing files are explicit in exports', async () => {
+  const disk = storage(), logs = createSceneImageDiagnostics(disk)
+  await logs.record('chat', attempt(1))
+  const before = await logs.read('chat')
+  const update = disk.updateJson
+  disk.updateJson = async (path, updater) => {
+    if (path.split('/').length === 3) throw new Error('detail write failed')
+    return update(path, updater)
+  }
+  await assert.rejects(logs.record('chat', attempt(1, 'generating')), /detail write failed/)
+  assert.deepEqual(await logs.read('chat'), before)
+  disk.updateJson = update
+  await logs.record('chat', attempt(1, 'generating'))
+  assert.deepEqual((await logs.read('chat')).records[0].events.map(row => row.stage), ['planning', 'generating'])
+  for (const path of disk.values.keys()) if (path.split('/').length === 3) disk.values.delete(path)
+  const missing = (await logs.read('chat')).records[0]
+  assert.equal(missing.unavailable, true)
+  assert.equal(missing.requestId, 'request-1')
 })

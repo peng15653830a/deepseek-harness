@@ -1,3 +1,5 @@
+import { resolveRuntimePresetMacros } from './runtime-presets.js'
+import { composeTavernRegexScripts } from './card-extension-reading.js'
 import { scriptPromptFrameInputs, consumeScriptPrompts } from './tavern-script-prompts.js'
 import { rememberTavernResources } from './workspace-resources.js'
 import { projectBackgroundInput } from './runtime-content-projection.js'
@@ -194,7 +196,8 @@ function frameSource(chat, card, operation) {
     worldBook: {
       branchId: str(worldBook.branchId) || null,
       revision: Number.isSafeInteger(Number(worldBook.revision)) ? Number(worldBook.revision) : null,
-      refs: Array.isArray(worldBook.refs) ? clone(worldBook.refs) : []
+      refs: Array.isArray(worldBook.refs) ? clone(worldBook.refs) : [],
+      diagnostics: Array.isArray(worldBook.diagnostics) ? clone(worldBook.diagnostics) : []
     },
     state: clone(operation.basedOn),
     preset: {
@@ -295,6 +298,7 @@ export function createTurnOrchestrator(options) {
     }
 
     const cardPath = cardPathOf(chat)
+    if ((mode === 'story' || mode === 'script') && cardPath === '') throw new Error('当前游玩缺少人物卡绑定，无法继续本轮。请先恢复人物卡或救援存档。')
     // Workbench tools must remain available when the file being repaired is invalid.
     const card = cardPath === '' ? null : mode === 'card' ? { name: chat.cardName } : await store.readCard(cardPath)
     if (cardPath !== '' && card === undefined) throw new Error('人物卡不存在: ' + cardPath)
@@ -303,10 +307,18 @@ export function createTurnOrchestrator(options) {
         ? await store.readCardExtensions(cardPath)
         : null
       const presetRegexScripts = await resolvePresetRegexScripts(chat)
-      const regexScripts = (Array.isArray(extensions && extensions.regexScripts) ? extensions.regexScripts : []).concat(presetRegexScripts)
+      const regexScripts = composeTavernRegexScripts(extensions, presetRegexScripts)
       runtimeUserText = projectBackgroundInput(runtimeUserText, regexScripts, 1).text
+      if (typeof options.projectUserTemplate === 'function' && runtimeUserText !== '') {
+        const projected = await options.projectUserTemplate({chat,card,turn,text:runtimeUserText})
+        runtimeUserText = projected.message.text
+        chat.promptTemplateInput = {turn,source:userText,message:projected.message}
+        chat.variables = projected.scopes.local
+        chat.promptTemplateInitialVariables = projected.scopes.initial
+      }
       rememberRuntimeInput(chat, turn, userText, runtimeUserText)
       chatChanged = true
+      if (chat.promptTemplateInput?.turn === turn) await store.writeChat(chat, {source:'prompt-template.input'})
     }
     let scriptReference = null
 
@@ -339,12 +351,28 @@ export function createTurnOrchestrator(options) {
       return { ready: true, mode, cardName: card === null ? (str(state.draft && state.draft.name) || '卡片工作台') : card.name, text: plan.text }
     }
 
-    // 世界书关键词匹配在上一轮正文提交后本地完成。正文准备只读取已经
-    // 保存好的下一轮上下文，玩家输入和候选项选择都不能在此重新触发匹配。
-    // 脚本显式提供的扫描文本单独复用同一匹配器，不把玩家输入混入扫描。
-    const templateWorldBook = await projectWorldBookTemplates({ chat, card, turn, userText: runtimeUserText })
-    const scriptWorldBook = typeof options.projectScriptPromptWorldbook === 'function' ? await options.projectScriptPromptWorldbook({ chat, card, turn }) : null
-    const worldBookContext = [str(chat.preparedWorldBookContext).trim(), str(scriptWorldBook && scriptWorldBook.context).trim(), templateWorldBook?.dynamicConstants ? '' : str(templateWorldBook && templateWorldBook.context).trim()].filter(Boolean).join('\n\n')
+    // Screening can persist a shared background task. Save the pending body and
+    // input first, then continue from its latest timeline instead of overwriting it.
+    if (typeof options.projectForegroundWorldbook === 'function') await store.writeChat(chat, { source: 'foreground.prepare-worldbook' })
+    const foregroundWorldBook = typeof options.projectForegroundWorldbook === 'function'
+      ? await options.projectForegroundWorldbook({ chat, card, turn, userText: runtimeUserText }) : null
+    if (typeof options.projectForegroundWorldbook === 'function') {
+      chat = await store.chatForSession(input.sessionId)
+      const current = chat && timeline.inspect({ chat })
+      if (!current || current.branchId !== foregroundOperation.basedOn.branchId || current.revision !== foregroundOperation.basedOn.revision ||
+          current.operations[foregroundOperation.operationId]?.status !== 'running') throw new Error('剧情已变化，本次正文准备已过期')
+    }
+    const templateWorldBook = foregroundWorldBook || await projectWorldBookTemplates({ chat, card, turn, userText: runtimeUserText })
+    const scriptWorldBook = !foregroundWorldBook && typeof options.projectScriptPromptWorldbook === 'function' ? await options.projectScriptPromptWorldbook({ chat, card, turn }) : null
+    const worldBookContext = foregroundWorldBook ? str(foregroundWorldBook.context) : [str(chat.preparedWorldBookContext).trim(), str(scriptWorldBook && scriptWorldBook.context).trim(), templateWorldBook?.dynamicConstants ? '' : str(templateWorldBook && templateWorldBook.context).trim()].filter(Boolean).join('\n\n')
+    if (foregroundWorldBook) {
+      if (foregroundWorldBook.randomState) chat.worldBookRandomState = foregroundWorldBook.randomState
+      if (foregroundWorldBook.reads) chat.worldBookReads = foregroundWorldBook.reads
+      chat.preparedWorldBookContext = worldBookContext
+      chat.preparedWorldBook = { ...foregroundWorldBook.activation, branchId: foregroundOperation.basedOn.branchId, revision: foregroundOperation.basedOn.revision }
+      chat.lastWorldBookRecall = clone(chat.preparedWorldBook)
+      chat.worldBookError = foregroundWorldBook.error
+    }
     const sceneWorldbook = typeof options.captureSceneWorldbook === 'function' ? await options.captureSceneWorldbook(chat, card) : null
     const plan = await planner.plan({ purpose: 'body', card, chat: templateWorldBook?.macroState ? { ...chat, macroState: templateWorldBook.macroState } : chat, userText: runtimeUserText, sessionId: input.sessionId, nativeTurn: turn, scriptReference, worldBookContext })
     const source = frameSource(chat, card, foregroundOperation)
@@ -352,15 +380,24 @@ export function createTurnOrchestrator(options) {
     if (scriptWorldBook && typeof scriptWorldBook.recordReads === 'function') chat.worldBookReads = scriptWorldBook.recordReads(chat.worldBookReads)
     source.worldBook.templateRefs = Array.isArray(templateWorldBook && templateWorldBook.refs) ? clone(templateWorldBook.refs) : []
     source.worldBook.templateDiagnostics = Array.isArray(templateWorldBook && templateWorldBook.diagnostics) ? clone(templateWorldBook.diagnostics) : []
-    const frame = frameBuilder.build({
+    const frameInput = {
       chatId: chat.id,
       branchId: foregroundOperation.basedOn.branchId,
       basedOnRevision: foregroundOperation.basedOn.revision,
       operationId: foregroundOperation.operationId,
       turn,
-      inputs: foregroundFrameInputs(plan, userText, runtimeUserText, chat.runtimePresetSnapshot, chat),
+      inputs: foregroundFrameInputs(plan, userText, runtimeUserText,
+        Object.hasOwn(input, 'runtimePresetSnapshot') ? input.runtimePresetSnapshot
+          : resolveRuntimePresetMacros(chat.runtimePresetSnapshot, { charName: card.name, macroState: chat.macroState }).snapshot, chat),
       source: { ...source, ...(sceneWorldbook ? { sceneWorldbook } : {}) }
-    })
+    }
+    let frame = frameBuilder.build(frameInput)
+    if (foregroundWorldBook?.log && typeof options.recordWorldbookRecall === 'function') {
+      let receipt
+      try { receipt = { recallLog: await options.recordWorldbookRecall({ chat, frame, log: foregroundWorldBook.log }) } }
+      catch (error) { receipt = { recallLogError: String(error?.message || error) } }
+      frame = frameBuilder.build({ ...frameInput, source: { ...source, worldBook: { ...source.worldBook, ...receipt } } })
+    }
     consumeScriptPrompts(chat)
     rememberFrame(chat, frame)
     chatChanged = true
@@ -392,9 +429,20 @@ export function createTurnOrchestrator(options) {
       operation.sceneWorldbook = await options.captureSceneWorldbook(chat, await store.readCard(cardPathOf(chat)))
     }
     chat.foregroundError = null
-    rememberRuntimeInput(chat, turn, userText, userText)
+    let projectedText = runtimeInputFor(chat, turn, userText)
+    if (projectedText === null) {
+      projectedText = userText
+      if (typeof options.projectUserTemplate === 'function' && userText !== '') {
+        const projected = await options.projectUserTemplate({chat,card:await store.readCard(cardPathOf(chat)),turn,text:userText})
+        projectedText = projected.message.text
+        chat.promptTemplateInput = {turn,source:userText,message:projected.message}
+        chat.variables = projected.scopes.local
+        chat.promptTemplateInitialVariables = projected.scopes.initial
+      }
+      rememberRuntimeInput(chat, turn, userText, projectedText)
+    }
     await store.writeChat(chat)
-    return { ready: true, mode, userText }
+    return { ready: true, mode, userText: projectedText }
   }
 
   // Tool writes are immediate, so a subsequent validation reads these bytes.
@@ -493,7 +541,7 @@ export function createTurnOrchestrator(options) {
     }
     if (mode === 'story' || mode === 'script') {
       if (renderMacros !== null && assistantText.includes('{{')) assistantText = renderMacros(assistantText, chat)
-      previousMvuVariables = lastTavernHelperVariables(chat.messages)
+      previousMvuVariables = chat.promptTemplateInput?.turn === turn ? lastTavernHelperVariables([chat.promptTemplateInput.message]) : lastTavernHelperVariables(chat.messages)
       const extensions = typeof store.readCardExtensions === 'function'
         ? await store.readCardExtensions(cardPathOf(chat))
         : null
@@ -501,7 +549,7 @@ export function createTurnOrchestrator(options) {
       const projectionText = assistantText
       reply = projectReply(sourceText, {
         projectionText,
-        regexScripts: (Array.isArray(extensions && extensions.regexScripts) ? extensions.regexScripts : []).concat(presetRegexScripts),
+        regexScripts: composeTavernRegexScripts(extensions, presetRegexScripts),
         placement: 2,
         isEdit: false,
         depth: 0
@@ -598,8 +646,10 @@ export function createTurnOrchestrator(options) {
         if (userText !== '') {
           const userMessage = { role: 'user', text: userText, ts: now(), native: true }
           if (previousMvuVariables !== undefined) Object.assign(userMessage, { swipeId: 0, swipes: [userText], variables: [clone(previousMvuVariables)] })
+          if (draft.promptTemplateInput?.turn === turn) Object.assign(userMessage, clone(draft.promptTemplateInput.message), {templateInputSource:userText})
           draft.messages.push(userMessage)
         }
+        delete draft.promptTemplateInput
         const assistantMessage = {
           role: 'assistant',
           text: assistantText,
@@ -649,37 +699,41 @@ export function createTurnOrchestrator(options) {
   }
 
   async function discard(input) {
-    let chat = await store.chatForSession(input.sessionId)
-    if (chat === undefined) return false
+    const target = await store.chatForSession(input.sessionId)
+    if (target === undefined) return false
     const turn = Math.max(0, Number(input.turn) || 0)
     let changed = false
-    const stages = stagedMap(chat)
-    if (Object.prototype.hasOwnProperty.call(stages, String(turn))) {
-      delete stages[String(turn)]
-      changed = true
-    }
-    if ((chat.mode || 'story') === 'script' && chat.scriptState && chat.scriptState.prepared && Number(chat.scriptState.prepared.nativeTurn) === turn) {
-      const script = await store.readScript(cardPathOf(chat))
-      if (script !== undefined && Array.isArray(script.chunks)) {
-        chat.scriptState = scripts.transition({ script, state: chat.scriptState, event: { kind: 'restore', revision: null, reference: chat.scriptState.prepared } }).state
+    // Re-evaluate the operation under the same lock as its persistence. A late
+    // failure signal must not overwrite a completed or rolled-back body.
+    await store.updateChat(target.id, async function (chat) {
+      const stages = stagedMap(chat)
+      if (Object.prototype.hasOwnProperty.call(stages, String(turn))) {
+        delete stages[String(turn)]
         changed = true
       }
-    }
-    if ((chat.mode || 'story') === 'card' && chat.workspace && chat.workspace.prepared && Number(chat.workspace.prepared.nativeTurn) === turn) {
-      chat.workspace.prepared = null
-      changed = true
-    }
-    if ((chat.mode || 'story') === 'story' || (chat.mode || 'story') === 'script') {
-      const operation = Object.values(timeline.inspect({ chat }).operations).find(function (item) {
-        return item.kind === 'body' && item.status === 'running' && Number(item.turn) === turn
-      })
-      if (operation !== undefined) {
-        const failed = timeline.complete({ chat, operationId: operation.id, basedOn: operation.basedOn, outcome: { status: 'failed' } })
-        chat = failed.chat
+      if ((chat.mode || 'story') === 'script' && chat.scriptState && chat.scriptState.prepared && Number(chat.scriptState.prepared.nativeTurn) === turn) {
+        const script = await store.readScript(cardPathOf(chat))
+        if (script !== undefined && Array.isArray(script.chunks)) {
+          chat.scriptState = scripts.transition({ script, state: chat.scriptState, event: { kind: 'restore', revision: null, reference: chat.scriptState.prepared } }).state
+          changed = true
+        }
+      }
+      if ((chat.mode || 'story') === 'card' && chat.workspace && chat.workspace.prepared && Number(chat.workspace.prepared.nativeTurn) === turn) {
+        chat.workspace.prepared = null
         changed = true
       }
-    }
-    if (changed) await store.writeChat(chat, { source: 'foreground.discard' })
+      if ((chat.mode || 'story') === 'story' || (chat.mode || 'story') === 'script') {
+        const operation = Object.values(timeline.inspect({ chat }).operations).find(function (item) {
+          return item.kind === 'body' && item.status === 'running' && Number(item.turn) === turn
+        })
+        if (operation !== undefined) {
+          const failed = timeline.complete({ chat, operationId: operation.id, basedOn: operation.basedOn, outcome: { status: 'failed' } })
+          chat = failed.chat
+          changed = true
+        }
+      }
+      return changed ? chat : undefined
+    }, { source: 'foreground.discard' })
     return changed
   }
 
@@ -688,9 +742,9 @@ export function createTurnOrchestrator(options) {
     if (chat === undefined) return []
     const mode = chat.mode || 'story'
     const webTools = chat.webSearchEnabled === true ? ['web_search'] : []
-    if (mode === 'script') return ['tavern_read_script', 'tavern_recall_history', ...webTools]
-    if (mode === 'card') return ['web_search', shellToolName, ...dshFileToolNames, 'skill', 'tavern_save_skill', ...cordisToolNames, 'tavern_user_profile_read', 'tavern_user_profile_save_draft', 'tavern_user_profile_confirm', 'tavern_read_card', 'tavern_read_card_raw', 'tavern_read_play_chat', 'tavern_read_worldbook', 'tavern_update_worldbook', 'tavern_read_preset', 'tavern_update_preset', 'tavern_update_card', 'tavern_restore_card', 'tavern_validate_card']
-    return ['tavern_recall_history', ...webTools]
+    if (mode === 'script') return ['skill', 'tavern_read_skill_reference', 'tavern_read_script', 'tavern_recall_history', 'worldbook_search', ...webTools]
+    if (mode === 'card') return ['web_search', shellToolName, ...dshFileToolNames, 'skill', 'tavern_read_skill_reference', 'tavern_save_skill', ...cordisToolNames, 'tavern_user_profile_read', 'tavern_user_profile_save', 'tavern_read_card', 'tavern_read_card_raw', 'tavern_read_play_chat', 'tavern_read_worldbook', 'tavern_update_worldbook', 'tavern_read_preset', 'tavern_update_preset', 'tavern_copy_card', 'tavern_convert_to_mvu', 'tavern_validate_mvu_conversion', 'tavern_update_card', 'tavern_restore_card', 'tavern_validate_card', 'tavern_test_response']
+    return ['skill', 'tavern_read_skill_reference', 'tavern_recall_history', 'worldbook_search', ...webTools]
   }
 
   async function modeFor(sessionId) {

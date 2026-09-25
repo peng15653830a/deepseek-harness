@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import vm from 'node:vm'
+import { stubFrameDependencyImports } from './fixtures/frame-dependency-imports.mjs'
 import { readFile } from 'node:fs/promises'
 const lodash = await readFile(new URL('../tavern-plugin/lib/vendor/runtime-assets/lodash/lodash.min.js', import.meta.url), 'utf8')
 const source = await readFile(process.env.FRAME_TEST_CLIENT || new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
@@ -19,7 +20,7 @@ function fixture() {
   const context = vm.createContext(w)
   vm.runInContext(lodash, context)
   let script = html.match(/<script data-dsh-tavern-helper>([\s\S]*?)<\/script>/)[1]
-  script = script.replace('import("/api/dsh-tavern/vendor/runtime-assets/zod/index.mjs")', 'Promise.resolve({})')
+  script = stubFrameDependencyImports(script)
   vm.runInContext(script, context)
   return { w, calls, reply(result = { updated: true }, ok = true) { for (const fn of listeners) fn({ source: parent, data: { type: 'dsh-tavern-helper-response', token: 'frame', requestId: calls.at(-1).requestId, ok, result, error: '保存失败' } }) } }
 }

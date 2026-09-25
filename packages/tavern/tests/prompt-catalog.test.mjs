@@ -24,7 +24,7 @@ const names = [
 ]
 
 test('固定提示词从独立 Markdown 文件完整加载', () => {
-  for (const name of names) assert.ok(prompt(name).length > 20, name + ' 提示词为空')
+  for (const name of names) assert.ok(prompt(name).trim().length > 0, name + ' 提示词为空')
   assert.equal(typeof prompt('card-system'), 'string')
   assert.match(prompt('story'), /小说续写引擎/)
   assert.match(prompt('story'), /本轮演出指引/)
@@ -52,12 +52,7 @@ test('固定提示词从独立 Markdown 文件完整加载', () => {
   assert.match(prompt('card-task-worldbook'), /目标已经明确时直接保存/)
   assert.match(prompt('card-task-preset'), /修改预设/)
   assert.match(prompt('card-task-preset'), /不会应用|无法使用/)
-  assert.match(prompt('card-task-debug-play'), /tavern_read_play_chat/)
-  assert.match(prompt('card-task-debug-play'), /不要一开始加载正文、日志或其他层/)
-  assert.match(prompt('card-task-debug-play'), /最新一轮只是默认入口，不是读取边界/)
-  assert.match(prompt('card-task-debug-play'), /其他轮次或整场 conversation/)
-  assert.match(prompt('card-task-debug-play'), /iframe 的实际 DOM/)
-  assert.match(prompt('card-task-debug-play'), /不得自动修正人物卡/)
+  assert.match(prompt('card-task-debug-play'), /^\/debug-card\s*$/)
   assert.throws(() => prompt('card-task-bind-script'), /未知提示词/)
   assert.throws(() => prompt('worldbook-selector'), /未知提示词/)
   assert.throws(() => prompt('missing'), /未知提示词/)

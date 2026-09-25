@@ -500,7 +500,9 @@ export function createCardPreparation(options = {}) {
         workspace.meta.revisionHistory = workspace.meta.revisionHistory.slice(-30)
       }
     }
-    return { card: workspace, view: project(workspace), player: str(request.player).trim(), changedFields, changed: changedFields.length > 0 }
+    const view = project(workspace)
+    return { card: workspace, view, nameChanged: viewBefore.name !== view.name,
+      player: str(request.player).trim(), changedFields, changed: changedFields.length > 0 }
   }
 
   function present(request) {

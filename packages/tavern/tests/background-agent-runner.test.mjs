@@ -1,5 +1,11 @@
+import { sharedWorldbookSearch } from '../tavern-plugin/lib/domain/worldbook-search.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
+
+// Match DSH's final complete-section restoration, after middleware runs.
+function completeSystem(sections) {
+  return sections.filter(s => s.complete).map(s => typeof s.text === 'function' ? s.text() : s.text).join('\n')
+}
 
 import { createBackgroundAgentRunner, executeBackgroundCompaction, maximumBackgroundTokens } from '../tavern-plugin/lib/background-agent-runner.js'
 import { readSceneImageSystemInstruction, readScenePlanInstruction } from '../tavern-plugin/lib/scene-image-prompts.js'
@@ -54,6 +60,7 @@ test('后台联网搜索按游戏快照统一开放，并在后台各任务间�
     let names = []
     const runner = createBackgroundAgentRunner({
       id: () => 'background-web-' + enabled,
+      resolveWebSearch: input => { assert.equal(input.sessionId, 'parent'); return enabled },
       agents: {
         get: () => ({ id: 'parent', session: { header: {} } }),
         async create(options) {
@@ -74,14 +81,14 @@ test('后台联网搜索按游戏快照统一开放，并在后台各任务间�
         }
       }
     })
-    await runner.run({ sessionId: 'parent', persistent: true, task: 'candidate', webSearchEnabled: enabled,
+    await runner.run({ sessionId: 'parent', persistent: true, task: 'candidate', webSearchEnabled: !enabled,
       selection: { provider: 'test', model: 'test' }, messages: [], tools: [], acceptWithoutText: () => true })
     await runner.dispose()
     return { allowed, names }
   }
 
-  assert.deepEqual(await visible(false), { allowed: ['skill', 'web_search'], names: ['skill'] })
-  assert.deepEqual(await visible(true), { allowed: ['skill', 'web_search'], names: ['skill', 'web_search'] })
+  assert.deepEqual(await visible(false), { allowed: ['skill', 'tavern_read_skill_reference', 'web_search'], names: ['skill'] })
+  assert.deepEqual(await visible(true), { allowed: ['skill', 'tavern_read_skill_reference', 'web_search'], names: ['skill', 'web_search'] })
 })
 
 test('手机私聊后台任务不暴露 Skill、搜索或文件工具', async () => {
@@ -203,8 +210,8 @@ test('人物设计阶段独立提高温度，结束后恢复结算温度', async
           tools: { restrict() {}, register(tool) { registered.set(tool.name, tool) } }
         })
         async function sampleTemperature() {
-          const listener = listeners.find(entry => entry.name === 'agent/request')
-          const request = await listener.listener({}, async () => ({}))
+          const request = await listeners.filter(entry => entry.name === 'agent/request').reduceRight(
+            (next, entry) => () => entry.listener({}, next), async () => ({}))()
           temperatures.push(request.temperature)
         }
         return { agent: {
@@ -360,7 +367,7 @@ test('后台固定背景只保存一次，连续候选、结算和恢复均进�
         session,
         followup(message) { pending = (async () => {
           const assembly = await assemble(null, { agent: { session } }, async () => ({ sections, tools: [] }))
-          const system = assembly.sections.map(section => section.text.replace(/\{\{([^}]+)\}\}/g, (_, name) => variables.get(name)())).join('\n')
+          const system = completeSystem(sections)
           history.push(message)
           const request = { sessionId: 'background', system, messages: history.slice() }
           packets.push({ system: request.system, messages: request.messages, text: message.content[0].text })
@@ -525,9 +532,9 @@ test('后台 Runner 执行候选任务，查询超限后提示开始推理而不
         assert.equal(runner.owns('candidate-session-1'), true)
         assert.match(message.content[0].text, /最近剧情/)
         assert.match(message.content[0].text, /雨水敲窗/)
-        const preStep = listeners.find(function (entry) { return entry.name === 'agent/pre-step' })
+        const preStep = listeners.findLast(function (entry) { return entry.name === 'agent/pre-step' })
         assert.ok(preStep)
-        const decision = await preStep.listener({ agent: child, turn: 1, step: 1 }, async function () { return { kind: 'enter', messages: [message] } })
+        const decision = await preStep.listener({ signal: new AbortController().signal, agent: child, turn: 1, step: 1 }, async function () { return { kind: 'enter', messages: [message] } })
         requestMessages = decision.messages
         pointResult = await registered[1].execute({ position: 3 })
         for (let index = 1; index <= 7; index++) {
@@ -606,10 +613,10 @@ test('后台 Runner 执行候选任务，查询超限后提示开始推理而不
   assert.equal(createCalls[0].agentOptions.maxTokens, 4000)
   assert.equal(sections[0].complete, true)
   assert.equal(sections.length, 1)
-  assert.doesNotMatch(sections[0].text, /tavern_runtime_preset_front/)
-  assert.doesNotMatch(sections[0].text, /future::macro/)
-  assert.doesNotMatch(sections[0].text, /候选系统提示/)
-  assert.doesNotMatch(sections[0].text, /tavern_background_task/)
+  assert.doesNotMatch(completeSystem(sections), /tavern_runtime_preset_front/)
+  assert.doesNotMatch(completeSystem(sections), /future::macro/)
+  assert.doesNotMatch(completeSystem(sections), /候选系统提示/)
+  assert.doesNotMatch(completeSystem(sections), /tavern_background_task/)
   assert.equal(variables.some(function (entry) { return entry.name === 'tavern_background_task' }), false)
   assert.equal(variables.some(function (entry) { return entry.name === 'tavern_runtime_preset_front' }), false)
   assert.deepEqual(requestMessages.map(function (entry) { return [entry.role, entry.content[0].text] }), [
@@ -625,12 +632,13 @@ test('后台 Runner 执行候选任务，查询超限后提示开始推理而不
   assert.equal(stagedSnapshots[0].scope, 'background')
   assert.equal(stagedSnapshots[0].snapshot.front.entries[0].content, '通用破限身份')
   assert.equal(stagedSnapshots[0].snapshot.back.entries[0].content, '通用破限预填充')
-  assert.deepEqual(restrictions, [{ allow: ['skill', 'web_search'] }])
+  assert.deepEqual(restrictions, [{ allow: ['skill', 'tavern_read_skill_reference', 'web_search'] }])
   assert.equal(registered[0].name, 'tavern_read_script')
   assert.equal(registered[1].name, 'tavern_point_script')
   const requestListener = listeners.find(function (entry) { return entry.name === 'agent/request' })
   assert.ok(requestListener)
-  assert.deepEqual(await requestListener.listener({}, async function () { return { provider: 'test', model: 'scripted' } }), { provider: 'test', model: 'scripted', temperature: 0.8 })
+  assert.deepEqual(await listeners.filter(entry => entry.name === 'agent/request').reduceRight(
+    (next, entry) => () => entry.listener({}, next), async () => ({ provider: 'test', model: 'scripted' }))(), { provider: 'test', model: 'scripted', maxTokens: 4000, temperature: 0.8 })
   assert.deepEqual(appended, [{
     type: 'subagent/descriptor',
     data: { version: 3, mode: 'one-shot', provider: 'dsh-tavern-background', label: '候选研究' }
@@ -744,7 +752,7 @@ test('生图常驻会话隔离后台任务与游戏，先保存编号且恢复�
     const session = resume ? sessions.get(id) : { id, header: options.meta, events: [], append(type, data) { this.events.push({ type, data }) } }
     assert.ok(session)
     sessions.set(id, session)
-    await options.setup({ systemPrompt: { section(value) { personas.set(id, value.text) }, variable() {}, suppressRuntimeContext() {} }, tools: { restrict() {}, register() {} }, on() {} })
+    await options.setup({ systemPrompt: { section(value) { personas.set(id, typeof value.text === 'function' ? value.text() : value.text) }, variable() {}, suppressRuntimeContext() {} }, tools: { restrict() {}, register() {} }, on() {} })
     return { agent: { session, followup(message) {
       session.append('user/message', { message })
       session.append('assistant/message', { message: { content: [{ type: 'text', text: '完成' }] } })
@@ -954,8 +962,8 @@ test('状态结算与候选生成复用同一个常驻后台 Agent，并且每�
       followup(message) {
         prompts.push(message.content[0].text)
         const response = responses[prompts.length - 1]
-        const preStep = listeners.find(function (entry) { return entry.name === 'agent/pre-step' })
-        work = Promise.resolve(preStep.listener({ agent: child }, async function () { return { kind: 'enter' } })).then(function () {
+        const preStep = listeners.findLast(function (entry) { return entry.name === 'agent/pre-step' })
+        work = Promise.resolve(preStep.listener({ signal: new AbortController().signal, agent: child }, async function () { return { kind: 'enter' } })).then(function () {
           events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: response }] } } })
         })
       },
@@ -1076,7 +1084,7 @@ test('常驻后台 Agent 每轮只挂载本轮工具', async () => {
   assert.equal(disposed, 1)
 })
 
-for (const rewindFails of [false, true]) test('后台 Surface 尽力回退，失败也继续任务: ' + rewindFails, async () => {
+for (const rewindFails of [false, true]) test('后台 Surface 回退失败时停止任务: ' + rewindFails, async () => {
   const parent = { id: 'parent-session', session: { header: { cwd: '/tmp/tavern', delegationDepth: 0 } } }
   const sourceEvents = [
     { seq: 0, type: 'user/message', data: { text: '有效正文' } },
@@ -1088,7 +1096,7 @@ for (const rewindFails of [false, true]) test('后台 Surface 尽力回退，失
   ]
   const appendCalls = []
   let createCalls = 0
-  let resumeCalls = 0
+  let resumeCalls = 0, followups = 0
   const agents = {
     get(id) { return id === parent.id ? parent : undefined },
     async resume(options) {
@@ -1113,6 +1121,7 @@ for (const rewindFails of [false, true]) test('后台 Surface 尽力回退，失
           }
         },
         followup() {
+          followups++
           work = Promise.resolve().then(function () {
             events.push({ seq: events.length, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '回退后候选' }] } } })
             events.push({ seq: events.length, type: 'turn/end', data: {} })
@@ -1128,13 +1137,15 @@ for (const rewindFails of [false, true]) test('后台 Surface 尽力回退，失
     }
   }
   const runner = createBackgroundAgentRunner({ agents, id: () => 'new-candidate' })
-  const result = await runner.run({
+  const pending = runner.run({
     sessionId: parent.id,
     selection: { provider: 'test', model: 'scripted' },
     system: '候选规则', messages: [], tools: [], persistent: true,
     persistentSessionId: 'old-candidate', rewindTo: 2
   })
 
+  if (rewindFails) { await assert.rejects(pending, /后台历史回退失败/); assert.equal(appendCalls.length, 0); assert.equal(createCalls, 0); assert.equal(followups, 0); return }
+  const result = await pending
   assert.equal(result.traceSessionId, 'old-candidate')
   assert.equal(result.traceBoundary, rewindFails ? 7 : 8)
   assert.equal(resumeCalls, 1)
@@ -1143,7 +1154,7 @@ for (const rewindFails of [false, true]) test('后台 Surface 尽力回退，失
   assert.equal(appendCalls.length, 1)
   assert.equal(appendCalls[0].type, 'assistant/message')
   assert.deepEqual(appendCalls[0].data.message.content, [])
-  assert.deepEqual(appendCalls[0].options.surfaceOp, { op: 'replace', startSeq: 3, end: 4 })
+  assert.deepEqual(appendCalls[0].options.surfaceOp, { op: 'replace', start: 3, end: 4 })
   assert.deepEqual(appendCalls[0].options.sourceEventSeqs, [3, 4])
 })
 
@@ -1297,7 +1308,7 @@ test('persistent background tools change with configuration without creating ano
 
 test('常驻后台会话在下一任务替换世界书，任务内固定且不改历史', async () => {
   let assemble, pending, current = '当前DLC', creates = 0
-  const seen = []
+  const seen = [], prompts = [], sections = []
   const session = { id: 'dynamic-book-background', header: {}, events: [], append(type, data) { const event = { type, data, seq: this.events.length }; this.events.push(event); return event } }
   const runner = createBackgroundAgentRunner({
     id: () => session.id,
@@ -1305,21 +1316,26 @@ test('常驻后台会话在下一任务替换世界书，任务内固定且不�
     resolveCurrentWorldbook: async () => current,
     agents: { get: () => ({ session: { header: {} } }), async create(options) {
       creates++
-      await options.setup({ systemPrompt: { section() {}, suppressRuntimeContext() {} }, tools: { restrict() {}, register() {} }, on(name, callback) { if (name === 'system-prompt/assemble') assemble = callback } })
-      return { agent: { session, followup() { pending = (async () => {
+      await options.setup({ systemPrompt: { section(value) { sections.push(value) }, suppressRuntimeContext() {} }, tools: { restrict() {}, register() {} }, on(name, callback) { if (name === 'system-prompt/assemble') assemble = callback } })
+      return { agent: { session, followup(message) { prompts.push(message.content[0].text); pending = (async () => {
         current = '任务中途变化'
         const result = await assemble({}, { agent: { session } }, async () => ({ sections: [], tools: [] }))
-        seen.push(result.sections.map(s => s.text).join('\n'))
+        seen.push(completeSystem(sections))
         session.append('assistant/message', { message: { content: [{ type: 'text', text: '完成' }] } })
       })() }, async whenIdle() { await pending } }, async dispose() {} }
     } }
   })
   try {
-    for (const text of ['当前DLC', '']) {
+    for (const text of ['当前DLC', '', { prefixContext: '固定规则', foregroundContext: '本轮骰子17' }, { prefixContext: '固定规则', foregroundContext: '本轮骰子8' }]) {
       current = text
       await runner.run({ sessionId: 'parent', persistent: true, task: 'candidate', selection: { provider: 'test', model: 'test' }, messages: [], tools: [] })
     }
     assert.equal(creates, 1)
+    assert.equal(seen[2], seen[3])
+    assert.doesNotMatch(seen.join('\n'), /本轮骰子/)
+    assert.match(prompts[2], /本轮骰子17/)
+    assert.match(prompts[3], /本轮骰子8/)
+    assert.doesNotMatch(prompts[3], /本轮骰子17/)
     assert.match(seen[0], /当前DLC/)
     assert.doesNotMatch(seen.join('\n'), /开局DLC|任务中途变化/)
     assert.doesNotMatch(seen[1], /当前DLC/)
@@ -1370,18 +1386,19 @@ test('temporary settlement tools conclude only after both submissions, without a
 })
 
 test('生图已有空前缀会话补入开局 system，连续任务保持背景且不混入正文', async () => {
-  let assemble, pending, reads = 0
-  const seen = [], personas = []
+  let assemble, pending, reads = 0, personaOverride = readSceneImageSystemInstruction()
+  const seen = [], sections = [], personas = []
   const session = { id: 'image-opening-context', header: {}, events: [], append(type, data) { const event = { type, data, seq: this.events.length }; this.events.push(event); return event } }
   const runner = createBackgroundAgentRunner({
     id: () => session.id,
+    imageSystemPrompt: () => personaOverride,
     resolveStablePrefix: async () => { reads++; return '【用户已确认的长期偏好】\n偏好标记\n【故事设定 · 人物卡】\n人物标记\n【常驻世界书】\n常驻标记' },
     resolveCurrentWorldbook: async () => undefined,
     agents: { get: () => ({ session: { header: {} } }), async create(options) {
-      await options.setup({ systemPrompt: { section(value) { personas.push(value.text) }, suppressRuntimeContext() {} }, tools: { restrict() {}, register() {} }, on(name, callback) { if (name === 'system-prompt/assemble') assemble = callback } })
+      await options.setup({ systemPrompt: { section(value) { personas.push(value) }, suppressRuntimeContext() {} }, tools: { restrict() {}, register() {} }, on(name, callback) { if (name === 'system-prompt/assemble') assemble = callback } })
       return { agent: { session, followup(message) { pending = (async () => {
         const result = await assemble({}, { agent: { session } }, async () => ({ sections: personas.map(text => ({ name: 'persona', text })), tools: [] }))
-        seen.push({ system: result.sections.map(s => s.text).join('\n'), message })
+        seen.push({ system: completeSystem(personas), message })
         session.append('assistant/message', { message: { content: [{ type: 'text', text: '完成' }] } })
       })() }, async whenIdle() { await pending } }, async dispose() {} }
     } }
@@ -1397,5 +1414,104 @@ test('生图已有空前缀会话补入开局 system，连续任务保持背景�
     }
     assert.doesNotMatch(seen[0].system, /当前场景一|历史场景二/)
     assert.equal(session.events.filter(event => event.data?.id === 'tavern-session-prefix:' + session.id).length, 1)
+    personaOverride = '已修改的生图系统指令'
+    await runner.run({ sessionId: 'parent', persistent: true, task: 'image', selection: { provider: 'test', model: 'fake' }, messages: [], tools: [] })
+    assert.match(seen[2].system, /已修改的生图系统指令/)
+    assert.doesNotMatch(seen[2].system, /独立的场景生图 Agent/)
   } finally { await runner.dispose() }
+})
+
+for (const task of ['settlement', 'image']) test(task + ' 已有会话在明确更新人物卡后切换背景', async () => {
+  let assemble, pending, revision = 0, background = '开局人物设定'
+  const seen = [], sections = []
+  const session = { id: 'updated-' + task, header: {}, events: [], append(type, data) { const event = { type, data, seq: this.events.length + 1 }; this.events.push(event); return event } }
+  const runner = createBackgroundAgentRunner({
+    resolveStablePrefixRevision: async () => revision, resolveStablePrefix: async () => background,
+    agents: { get: () => ({ session: { header: {} } }), async create(options) {
+      await options.setup({ systemPrompt: { section(value) { sections.push(value) }, suppressRuntimeContext() {} }, tools: { restrict() {}, register() {} }, on(event, callback) { if (event === 'system-prompt/assemble') assemble = callback } })
+      return { agent: { session, followup() { pending = (async () => {
+        const result = await assemble({}, { agent: { session } }, async () => ({ sections: [], tools: [] }))
+        seen.push(completeSystem(sections))
+        session.append('assistant/message', { message: { content: [{ type: 'text', text: '完成' }] } })
+      })() }, async whenIdle() { await pending } }, async dispose() {} }
+    } }
+  })
+  try {
+    for (const version of [0, 1, 1]) {
+      revision = version; background = version ? '已确认的新版设定' : '开局人物设定'
+      await runner.run({ sessionId: 'parent', persistent: true, task, selection: { provider: 'test', model: 'fake' }, messages: [], tools: [] })
+    }
+    assert.match(seen[0], /开局人物设定/)
+    assert.doesNotMatch(seen[1], /开局人物设定/)
+    assert.match(seen[1], /已确认的新版设定/)
+    assert.equal(seen[1], seen[2])
+    assert.equal(session.events.filter(e => e.data?.source?.cardContextRevision === 1).length, 1)
+  } finally { await runner.dispose() }
+})
+
+test('世界书检索在候选、结算、人物设计和筛选复用后台会话，查询始终归属当前前台对话', async () => {
+  const registered = new Map(), calls = [], hooks = new Map()
+  let currentTask
+  const shared = sharedWorldbookSearch(async (sessionId, args) => {
+    calls.push({ sessionId, args, task: currentTask })
+    return { entries: [{ ref: 'entry:62', text: '少林门规' }] }
+  })
+  const runner = createBackgroundAgentRunner({
+    id: () => 'background-worldbook-shared', sharedTools: [shared],
+    agents: {
+      get: () => ({ id: 'parent', session: { header: {} } }),
+      async create(options) {
+        await options.setup({
+          systemPrompt: { section() {}, suppressRuntimeContext() {} },
+          on(name, fn) { hooks.set(name, fn) },
+          tools: { restrict() {}, register(tool) { registered.set(tool.name, tool); return () => registered.delete(tool.name) } }
+        })
+        return { agent: {
+          session: { id: 'background-worldbook-shared', events: [], append() {} }, followup() {},
+          async whenIdle() {
+            const tool = registered.get('worldbook_search')
+            assert.ok(tool, currentTask)
+            assert.equal(tool.parameters.type, 'object')
+            assert.ok(tool.parameters.properties.query)
+            const result = JSON.parse(await tool.execute({ query: '少林' }))
+            assert.equal(result.entries[0].ref, 'entry:62')
+            const read = JSON.parse(await tool.execute({ refs: ['entry:62'] }))
+            assert.equal(read.entries[0].text, '少林门规')
+            const request = await hooks.get('agent/request')({}, async () => ({ tools: [tool] }))
+            assert.equal(request.tools[0].name, 'worldbook_search')
+          }
+        }, async dispose() {} }
+      }
+    }
+  })
+  let traceSessionId
+  for (currentTask of ['worldbook-filter', 'candidate', 'settlement', 'character-design', 'worldbook-filter']) {
+    const result = await runner.run({ sessionId: 'parent', persistent: true, persistentSessionId: traceSessionId,
+      task: currentTask, selection: { provider: 'test', model: 'test' }, messages: [], tools: [], acceptWithoutText: () => true })
+    traceSessionId = result.traceSessionId
+  }
+  assert.equal(calls.length, 10)
+  assert.ok(calls.every(call => call.sessionId === 'parent'))
+  await runner.dispose()
+})
+
+test('后台压缩从匹配的命令日志恢复具体原因，不误用旧失败', async () => {
+  const { compactionFailureMessage } = await import('../tavern-plugin/lib/domain/compaction-failure.js')
+  const text = 'Compaction could not produce a useful summary.'
+  const events = [
+    { type: 'compaction/end', data: { sourceCommandId: 'old', error: '400: user message must have content' } },
+    { type: 'compaction/end', data: { sourceCommandId: 'current', error: 'summary is not smaller than the shadowed content (1931 estimated framed tokens >= 1612)' } }
+  ]
+  let commandId = 'current'
+  const agent = { session: { snapshotEvents: () => events }, ctx: { get: () => ({ execute: async () => ({ commandId, result: { kind: 'error', text } }) }) } }
+  await assert.rejects(executeBackgroundCompaction(agent), error => {
+    assert.match(compactionFailureMessage(error), /摘要未缩短内容/)
+    return true
+  })
+  commandId = 'unmatched'
+  await assert.rejects(executeBackgroundCompaction(agent), error => {
+    assert.equal(error.cause, undefined)
+    assert.equal(compactionFailureMessage(error), text)
+    return true
+  })
 })

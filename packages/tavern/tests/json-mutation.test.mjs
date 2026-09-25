@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { applyJsonChanges, diffJson } from '../tavern-plugin/lib/domain/json-mutation.js'
+import { applyJsonChanges, applyJsonChangesShared, diffJson } from '../tavern-plugin/lib/domain/json-mutation.js'
 
 test('JSON mutation round-trip 保留完整目标值', function () {
   const before = {
@@ -60,4 +60,21 @@ test('数组截断与元素修改可以重放', function () {
 test('相同 JSON 不产生 changes', function () {
   const value = { id: 'chat-1', nested: { active: true }, messages: [] }
   assert.deepEqual(diffJson(value, structuredClone(value)), [])
+})
+
+
+test('shared journal changes match replay without copying or mutating untouched rows', () => {
+  const before={messages:[{text:'keep',variables:[{hp:7}]},{text:'edit',variables:[{hp:8,mp:2}]}],items:['a','b']}
+  const desired=structuredClone(before)
+  desired.messages[1].variables[0].hp=9
+  delete desired.messages[1].variables[0].mp
+  desired.items.splice(1,1,'c','d')
+  const changes=diffJson(before,desired)
+  const next=applyJsonChangesShared(before,changes)
+  assert.deepEqual(next,applyJsonChanges(before,changes))
+  assert.equal(next.messages[0],before.messages[0])
+  assert.notEqual(next.messages[1],before.messages[1])
+  assert.equal(before.messages[1].variables[0].hp,8)
+  assert.throws(()=>applyJsonChangesShared(before,[{op:'set',path:['messages',999,'text'],value:'bad'}]))
+  assert.throws(()=>applyJsonChangesShared(before,[{op:'set',path:['__proto__','bad'],value:1}]))
 })

@@ -1,0 +1,14 @@
+{
+  "upstreamCommit": "d6f520d149aba146305b0b781ddd691d449c28d2",
+  "version": "1.17.9",
+  "files": {
+    "engine.js": {
+      "bytes": 3654642,
+      "sha256": "f6eb7ef7df4ae014a324823faa355efb75192fb6645190e0b43ac9d3e929cb01"
+    },
+    "engine.js.LICENSE.txt": {
+      "bytes": 701,
+      "sha256": "0107f681592252558e68d4327380d8d40c5eeb5014df235ae257edbd5e75a238"
+    }
+  }
+}

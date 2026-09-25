@@ -86,3 +86,21 @@ test('服务重启时排队任务可继续，无结果的运行任务明确中�
   assert.equal(recovered.tasks.find((item) => item.taskId === running.taskId).status, 'interrupted')
   assert.equal(recovered.tasks.find((item) => item.taskId === running.taskId).busy, false)
 })
+
+test('同步从同一份已协调快照投影活动，无需再次读取聊天', async () => {
+  let reads = 0
+  let chat = { id: 'one' }
+  const mailbox = createDurableTaskMailbox({
+    store: {
+      async readChat() { reads++; return structuredClone(chat) },
+      async writeChat(next) { chat = structuredClone(next); return { ...chat, activity: 'saved' } }
+    },
+    reconcile() { return { status: 'succeeded', stage: 'completed' } }
+  })
+  await mailbox.submit('one', { requestId: 'r', kind: 'candidate', input: {} })
+  reads = 0
+  const result = await mailbox.sync('one', { requestId: 'r' }, current => current.activity)
+  assert.equal(reads, 1)
+  assert.equal(result.task.status, 'succeeded')
+  assert.equal(result.projection, 'saved')
+})

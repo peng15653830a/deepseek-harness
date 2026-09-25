@@ -4,7 +4,7 @@ import path from 'node:path'
 import { createDurableFilePromotion } from '../durable-file-promotion.js'
 
 const MIGRATION_MARKER = '.legacy-data-migration-v1.json'
-const MERGED_JSON_FILES = new Set(['index.json', 'sessions.json', '.material-bindings.json', '.file-resources-v1.json'])
+const MERGED_JSON_FILES = new Set(['index.json', 'sessions.json', '.material-bindings.json', '.file-resources-v1.json', 'tavern-settings.json'])
 const durableFiles = createDurableFilePromotion()
 
 function safeLabel(value) {
@@ -79,7 +79,7 @@ async function mergeJson(source, target, relative) {
   const current = await readJson(target, {})
   let merged
   if (relative === 'index.json') merged = mergeIndex(current, incoming)
-  else if (relative === '.file-resources-v1.json') merged = mergeDeep(current, incoming)
+  else if (relative === '.file-resources-v1.json' || relative === 'tavern-settings.json') merged = mergeDeep(current, incoming)
   else merged = { ...(incoming || {}), ...(current || {}) }
   await writeJsonAtomic(target, merged)
 }

@@ -70,3 +70,27 @@ test('旧数据升级时备份并合并索引，冲突文件保留但不覆盖�
   assert.equal(second.migratedSources, 0)
   assert.equal(second.conflicts, 0)
 })
+
+test('升级迁移保留旧自定义系统提示词，已有用户修改优先，重复升级不重置', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tavern-prompt-migration-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const legacy = path.join(root, 'legacy')
+  const targetRoot = path.join(root, 'current')
+  const { SYSTEM_PROMPT_NAMES } = await import('../tavern-plugin/lib/prompt-catalog.js')
+  const { presentTavernSettings, resolveSystemPrompt } = await import('../tavern-plugin/lib/domain/tavern-settings.js')
+  const overrides = Object.fromEntries(SYSTEM_PROMPT_NAMES.map(name => [name, '用户内容：' + name]))
+  await json(path.join(legacy, 'tavern-settings.json'), { promptOverrides: overrides, systemAppendEnabled: true })
+  await json(path.join(targetRoot, 'tavern-settings.json'), { promptOverrides: { story: '新目录用户修改' }, systemAppendEnabled: false })
+  const options = { targetRoot, backupRoot: path.join(root, 'backups'), legacyRoots: [{ path: legacy, label: 'old' }] }
+  await migrateLegacyTavernData(options)
+  await migrateLegacyTavernData(options)
+  const saved = JSON.parse(await readFile(path.join(targetRoot, 'tavern-settings.json'), 'utf8'))
+  assert.deepEqual(saved.promptOverrides, { ...overrides, story: '新目录用户修改' })
+  assert.equal(saved.systemAppendEnabled, false)
+  const defaults = Object.fromEntries(SYSTEM_PROMPT_NAMES.map(name => [name, '新版默认']))
+  for (const item of presentTavernSettings(saved, defaults).systemPrompts) {
+    assert.equal(item.customized, true)
+    assert.equal(item.text, saved.promptOverrides[item.name])
+    assert.equal(resolveSystemPrompt(saved, item.name, () => '新版默认'), item.text)
+  }
+})

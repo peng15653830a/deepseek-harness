@@ -21,6 +21,10 @@ The deterministic host build applies these adaptations:
 - uses the complete current-floor snapshot when no earlier floor has valid MVU
   data, so resumed/imported games can settle without rewriting historical floors.
 
+- disables ST JSONL variable compaction, its legacy prompt, manual cleanup button,
+  and enable controls; historical snapshots remain available for rollback and
+  imported-chat restoration. Existing cleanup settings do not trigger writes.
+
 It does not patch MVU parsing, validation or variable calculation.
 The sandbox-local uniqueness change is valid because the Host enforces exactly
 one official MVU core per chat sandbox; the readiness barrier only restores the

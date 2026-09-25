@@ -20,6 +20,7 @@ export async function createHelperChatDataHost() {
   })
   const adapter = createTavernScriptHostAdapter({
     resolveChat: id => persistence.read(id), writeChat: (...args) => persistence.write(...args),
+    patchChat: (...args) => persistence.patch(...args),
     updateChat: (...args) => persistence.update(...args), readChatRevision: (...args) => persistence.readRevision(...args),
     hasScripts: async () => true, isPlayChat: chat => chat.mode === 'story',
     readCard: async () => ({}), worldBooks: {}, scriptDispatch: {}

@@ -9,11 +9,11 @@ class Element {
   getAttribute(key) { return this.attrs[key] || null }
   insertAdjacentElement(position, element) { assert.equal(position, 'afterend'); this.panel = element }
 }
-function setup(text, storage = new Map(), sessionId = 'a') {
+function setup(text, storage = new Map(), sessionId = 'a', options = {}) {
   const row = new Element(text); row.attrs['data-chat-turn'] = '8'
   const root = { ownerDocument: { createElement() { return new Element() } }, querySelectorAll() { return [row] } }
-  const controls = client.createTurnErrorControls(root, { sessionId, storage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) } })
-  return { row, controls }
+  const controls = client.createTurnErrorControls(root, { ...options, sessionId, storage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) } })
+  return { row, root, controls }
 }
 test('长错误默认收起，可展开、单独隐藏和恢复，原始文本不变', () => {
   const text = '400: message content cannot be empty ' + 'PRIVATE'.repeat(200)
@@ -51,4 +51,47 @@ test('已有回退投影的隐藏状态不被恢复按钮撤销', () => {
   assert.equal(row.style.display, '')
   row.hidden = true; row.style.display = 'none'; controls.apply()
   assert.equal(row.panel.hidden, true)
+})
+
+test('历史错误隐藏持久保存，换浏览器恢复，成功消息不参与清理', async () => {
+  let saved = []
+  const first = setup('本轮运行失败 Error: network', new Map(), 'a', {
+    hiddenTurns: [], onToggle: async (turn, hide) => { saved = hide ? [turn] : []; }
+  })
+  first.controls.apply()
+  await first.row.panel.children[2].onclick()
+  assert.deepEqual(saved, [8])
+  const second = setup('本轮运行失败 Error: network', new Map(), 'a', { hiddenTurns: saved })
+  second.controls.apply()
+  assert.equal(second.row.style.display, 'none')
+  assert.equal(second.row.textContent, '本轮运行失败 Error: network')
+})
+test('持久保存失败不假装已经隐藏', async () => {
+  let error
+  const h = setup('failure', new Map(), 'a', {
+    hiddenTurns: [], onToggle: async () => { throw new Error('offline') }, onError: value => { error = value }
+  })
+  h.controls.apply()
+  await h.row.panel.children[2].onclick()
+  assert.equal(h.row.style.display, '')
+  assert.equal(error.message, 'offline')
+})
+
+
+test('同一会话容器重复挂载只保留一个错误控件，旧实例不能重新插入', () => {
+  const first = setup('failure')
+  first.controls.apply()
+  const oldPanel = first.row.panel
+  const next = client.createTurnErrorControls(first.root, { sessionId: 'a', hiddenTurns: [8], storage: { getItem() {}, setItem() {} } })
+  next.apply()
+  const newPanel = first.row.panel
+  assert.equal(oldPanel.removed, true)
+  assert.notEqual(newPanel, oldPanel)
+  first.controls.apply()
+  first.controls.dispose()
+  assert.equal(first.row.panel, newPanel)
+  assert.equal(newPanel.removed, undefined)
+  assert.equal(first.row.style.display, 'none')
+  next.dispose()
+  assert.equal(first.row.style.display, '')
 })

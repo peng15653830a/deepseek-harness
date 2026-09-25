@@ -14,3 +14,11 @@ test('模板静态服务仅提供清单内且校验通过的文件',async()=>{
   body=Buffer.from('changed')
   await assert.rejects(read(prefix+'index.js'),/校验失败/)
 })
+
+test('入口 URL 绑定当前构建内容，而非固定上游版本', async () => {
+  const { fullPromptTemplateRuntimeInfo } = await import('../tavern-plugin/lib/domain/full-prompt-template-assets.js')
+  const { entryUrl } = await fullPromptTemplateRuntimeInfo()
+  const url = new URL(entryUrl, 'http://localhost')
+  const asset = await createFullPromptTemplateAssetReader()(url.pathname)
+  assert.equal(url.searchParams.get('v'), createHash('sha256').update(asset.body).digest('hex'))
+})

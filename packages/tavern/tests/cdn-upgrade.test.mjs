@@ -8,6 +8,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { parse } from 'yaml'
+import { adaptedDshVersion } from '../bin/dsh-compatibility.mjs'
 
 const execute = promisify(execFile)
 const unix = await readFile(new URL('../install.sh', import.meta.url), 'utf8')
@@ -39,7 +40,8 @@ test('旧版 Desktop 经最新安装脚本走 CDN 覆盖升级：补丁落盘、
     ['cordis.patch.yml', Buffer.from('[]\n')],
     ['install.sh', Buffer.from(unix)],
     ['install.ps1', Buffer.from(windows)],
-    // Stub only dependency execution and DSH boot; download, hashing and overwrite are real.
+    // Stub dependency provisioning/execution and DSH boot; download, hashing and overwrite are real.
+    ['bin/desktop-package-manager.mjs', Buffer.from('console.log(' + JSON.stringify(mocks) + ');')],
     ['bin/dsh-tavern.mjs', Buffer.from("import fs from 'node:fs'; fs.writeFileSync(new URL('../installed.txt', import.meta.url), process.argv.slice(2).join(' '));\n")],
   ])
   for (const file of [...patches, 'bin/dsh-compatibility.mjs', 'config/dsh-compatibility.json']) {
@@ -82,10 +84,10 @@ test('旧版 Desktop 经最新安装脚本走 CDN 覆盖升级：补丁落盘、
   const downloaded = await (await fetch(`${base}/source@${revision}/${installerName}`)).text()
   await writeFile(bootstrap, (isWindows ? '\uFEFF' : '') + downloaded)
   const verifyPatch = path.join(mocks, 'verify-patches.cjs')
-  await writeFile(verifyPatch, `const fs=require('node:fs'), path=require('node:path'); const app=process.argv[process.argv.indexOf('--dir')+1]; for(const file of ${JSON.stringify(patches)}) fs.readFileSync(path.join(app,file));`)
+  await writeFile(verifyPatch, `const fs=require('node:fs'), path=require('node:path'); const app=process.argv[process.argv.indexOf('--dir')+1]; for(const file of ${JSON.stringify(patches)}) fs.readFileSync(path.join(app,file)); if(process.env.DSH_TEST_DEPENDENCY_EXIT) process.exit(Number(process.env.DSH_TEST_DEPENDENCY_EXIT));`)
   for (const [name, body] of [
     ['git', isWindows ? '@exit /b 1\r\n' : '#!/bin/sh\nexit 1\n'],
-    ['dsh', isWindows ? '@exit /b 0\r\n' : '#!/bin/sh\nexit 0\n'],
+    ['dsh', isWindows ? `@echo ${adaptedDshVersion}\r\n@exit /b 0\r\n` : `#!/bin/sh\necho '${adaptedDshVersion}'\nexit 0\n`],
     ['pnpm', isWindows ? `@"${process.execPath}" "${verifyPatch}" %*\r\n@exit /b %errorlevel%\r\n` : `#!/bin/sh\nexec "${process.execPath}" "${verifyPatch}" "$@"\n`],
   ]) await writeFile(path.join(mocks, name + (isWindows ? '.cmd' : '')), body, { mode: 0o755 })
   const env = { ...process.env, DSH_HOME: root, DSH_TAVERN_HOST: 'desktop', DSH_TAVERN_APP_DIR: app,
@@ -98,8 +100,8 @@ test('旧版 Desktop 经最新安装脚本走 CDN 覆盖升级：补丁落盘、
   // own builtin module search path instead of inheriting the incompatible one.
   if (isWindows) for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key]
   env[isWindows ? 'Path' : 'PATH'] = mocks + path.delimiter + searchPath
-  const run = () => execute(isWindows ? 'powershell.exe' : 'sh', isWindows
-    ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bootstrap] : [bootstrap], { env, timeout: 45000, maxBuffer: 1024 * 1024 })
+  const run = (extraEnv = {}) => execute(isWindows ? 'powershell.exe' : 'sh', isWindows
+    ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bootstrap] : [bootstrap], { env: { ...env, ...extraEnv }, timeout: 45000, maxBuffer: 1024 * 1024 })
   try { await run() } catch (error) { throw new Error(error.stdout + '\n' + error.stderr) }
   assert.equal(await readFile(path.join(app, 'installed.txt'), 'utf8'), 'install --host desktop')
   assert.deepEqual(JSON.parse(await readFile(path.join(app, 'dsh-tavern-runtime.json'), 'utf8')), manifest)
@@ -108,6 +110,12 @@ test('旧版 Desktop 经最新安装脚本走 CDN 覆盖升级：补丁落盘、
   for (const [file, content] of protectedFiles) assert.equal(await readFile(file, 'utf8'), content)
   assert.ok(!requests.includes('/forbidden-archive'), 'CDN success must not fall back to archive')
   assert.ok(!requests.some(url => /escape|do-not-download/.test(url)))
+  // EXIT cleanup must preserve a dependency failure, including on macOS sh.
+  await assert.rejects(run({ DSH_TEST_DEPENDENCY_EXIT: '23' }), error => {
+    assert.equal(error.code, isWindows ? 1 : 23)
+    assert.doesNotMatch(error.stdout, /DSH Tavern Desktop 版安装完成/)
+    return true
+  })
   // Failed CDN verification must not overwrite installed resources or report success.
   corruptPatch = true
   await assert.rejects(run())

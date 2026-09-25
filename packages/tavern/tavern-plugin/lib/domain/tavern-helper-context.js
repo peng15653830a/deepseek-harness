@@ -1,3 +1,4 @@
+import { assertPluginJson } from './tavern-chat-plugin-data.js'
 import { projectAgentContent } from './runtime-content-projection.js'
 
 function str(value) {
@@ -135,7 +136,17 @@ export function replaceTavernHelperVariables(chat, request = {}) {
   const option = request.option && typeof request.option === 'object' ? request.option : {}
   const value = clone(request.variables && typeof request.variables === 'object' ? request.variables : {})
   if (option.type === 'chat') {
-    chat.variables = value
+    if (option.localMutation !== undefined) {
+      const mutation = option.localMutation
+      assertPluginJson(mutation, '聊天变量操作')
+      if (typeof mutation.key !== 'string' || !mutation.key || mutation.key === '__proto__'
+        || Object.keys(mutation).some(key => !['key', 'value', 'remove'].includes(key))
+        || (mutation.remove !== true && !Object.hasOwn(mutation, 'value'))) throw new Error('聊天变量操作无效')
+      const next = clone(chat.variables || {})
+      if (mutation.remove === true) delete next[mutation.key]
+      else Object.defineProperty(next, mutation.key, { value: clone(mutation.value), enumerable: true, writable: true, configurable: true })
+      chat.variables = next
+    } else chat.variables = value
     return { type: 'chat' }
   }
   if (option.type === 'script') {

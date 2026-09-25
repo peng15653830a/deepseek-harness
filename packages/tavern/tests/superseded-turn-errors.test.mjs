@@ -12,7 +12,7 @@ function fixture() {
     { seq: 20, type: 'turn/end', data: { turn: 7, reason: { kind: 'error' } } },
     message(30, 8, 'regenerated'),
     { seq: 31, type: 'turn/end', data: { turn: 8, reason: { kind: 'completed' } } },
-    message(32, 6, '', { surfaceOp: { op: 'replace', startSeq: 10, end: 30 }, sourceEventSeqs: [10, 30] }),
+    message(32, 6, '', { surfaceOp: { op: 'replace', start: 10, end: 30 }, sourceEventSeqs: [10, 30] }),
     { seq: 40, type: 'turn/end', data: { turn: 9, reason: { kind: 'error' } } }
   ]
 }
@@ -40,7 +40,7 @@ test('连续重生成从持久替换记录恢复，不受后续事件增长影�
   const events = fixture()
   const body = { seq: 50, type: 'assistant/message', data: { turn: 10, message: { source: { kind: 'model' }, content: [{ type: 'text', text: 'next' }] } } }
   events.push(body, { seq: 51, type: 'turn/end', data: { turn: 10, reason: { kind: 'completed' } } }, {
-    seq: 52, type: 'assistant/message', data: { turn: 6, message: { source: { kind: 'model' }, content: [] } }, surfaceOp: { op: 'replace', startSeq: 32, end: 50 }
+    seq: 52, type: 'assistant/message', data: { turn: 6, message: { source: { kind: 'model' }, content: [] } }, surfaceOp: { op: 'replace', start: 32, end: 50 }
   })
   assert.deepEqual(surface.supersededRegenerationErrorTurns({ events, suppressedDshTurns: [8, 10] }), [7, 9])
 })
@@ -142,11 +142,11 @@ test('宿主提供独立错误投影，前端按 Session 隔离并只观察对�
   const host = await readFile(new URL('../tavern-plugin/lib/index.js', import.meta.url), 'utf8')
   const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
   assert.match(host, /const projectionEvents = sessionDebugEvidence\(chat.sessionId\).events/)
-  assert.match(host, /suppressedDshTurns = [\s\S]*abortedRegenerationTurns\(\{ events: projectionEvents \}\)/)
+  assert.match(host, /suppressedDshTurns = foregroundSuppressedTurns\(chat, projectionEvents\)/)
   assert.match(host, /suppressedDshErrorTurns: supersededRegenerationErrorTurns\(\{\s*events: projectionEvents,\s*suppressedDshTurns: chat.suppressedDshTurns/)
   assert.match(source, /createElement\(SupersededTurnErrors, Object.assign\(\{\}, props, \{ key: props.sessionId \}\)\)/)
   const component = source.slice(source.indexOf('function SupersededTurnErrors('), source.indexOf('function CandidateQuestion('))
   assert.match(component, /closest\("\[data-conversation-scroll\]"\)/)
-  assert.match(component, /observer.observe\(root,/)
+  assert.match(component, /observeTurnErrorProjection\(root, apply\)/)
   assert.match(component, /observer.disconnect\(\); controls.dispose\(\); projection.dispose\(\)/)
 })

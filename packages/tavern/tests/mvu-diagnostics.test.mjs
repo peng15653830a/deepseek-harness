@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { inflateRawSync } from 'node:zlib'
 import test from 'node:test'
-import { createMvuDiagnosticStore, createMvuDiagnosticExport, redactDiagnostic, sanitizeModuleFailure, redactMvuLoadError, sanitizeMvuLoadDiagnostic } from '../tavern-plugin/lib/domain/mvu-diagnostics.js'
+import { diagnosticZip, createMvuDiagnosticStore, createMvuDiagnosticExport, redactDiagnostic, sanitizeModuleFailure, redactMvuLoadError, sanitizeMvuLoadDiagnostic } from '../tavern-plugin/lib/domain/mvu-diagnostics.js'
 import { createMvuSettlementModule } from '../tavern-plugin/lib/domain/mvu-background-settlement.js'
 import { createTavernScriptHostAdapter } from '../tavern-plugin/lib/domain/tavern-script-host-adapter.js'
 import { createTavernScriptDispatch } from '../tavern-plugin/lib/domain/tavern-script-dispatch.js'
@@ -9,6 +10,29 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import vm from 'node:vm'
+
+function zipText(buffer) {
+  const parts = []
+  for (let offset = 0; buffer.readUInt32LE(offset) === 0x04034b50;) {
+    const size = buffer.readUInt32LE(offset + 18)
+    const nameLength = buffer.readUInt16LE(offset + 26), extraLength = buffer.readUInt16LE(offset + 28)
+    const start = offset + 30 + nameLength + extraLength
+    const payload = buffer.subarray(start, start + size)
+    const data = buffer.readUInt16LE(offset + 8) === 8 ? inflateRawSync(payload) : payload
+    assert.equal(data.length, buffer.readUInt32LE(offset + 22))
+    parts.push(buffer.subarray(offset + 30, offset + 30 + nameLength).toString(), data.toString())
+    offset = start + size
+  }
+  return parts.join('\n')
+}
+
+test('诊断 ZIP 无损压缩重复日志并限制未压缩容量', () => {
+  const content = '日志和重复请求字段\n'.repeat(10000)
+  const zipped = diagnosticZip([{ path: 'session.jsonl', content }])
+  assert.ok(zipped.length < Buffer.byteLength(content) / 10)
+  assert.equal(zipText(zipped), 'session.jsonl\n' + content)
+  assert.throws(() => diagnosticZip([{ path: 'large', content: Buffer.alloc(33 * 1024 * 1024) }]), /32 MiB/)
+})
 
 function storage() {
   const data = new Map()
@@ -31,9 +55,9 @@ test('MVU 加载诊断只允许结构字段，错误脱敏、长度受限且随 
   const store = createMvuDiagnosticStore(storage())
   await store.record('s', { stage: 'mvu-load', diagnostic })
   const zip = await createMvuDiagnosticExport({ sessionId: 's', store, environment: { mvuAsset: { phase: 'verify-failed', expectedSha256: 'a'.repeat(64), actualSha256: 'b'.repeat(64) } } })
-  assert.match(zip.buffer.toString(), /download-completed/)
-  assert.match(zip.buffer.toString(), /verify-failed/)
-  assert.doesNotMatch(zip.buffer.toString(), /PRIVATE_USER|DO_NOT_LOG/)
+  assert.match(zipText(zip.buffer), /download-completed/)
+  assert.match(zipText(zip.buffer), /verify-failed/)
+  assert.doesNotMatch(zipText(zip.buffer), /PRIVATE_USER|DO_NOT_LOG/)
   assert.equal(sanitizeMvuLoadDiagnostic({ phase: 'invented', httpStatus: Infinity }), null)
   assert.ok(JSON.stringify(sanitizeMvuLoadDiagnostic({ phase: 'execution-failed', message: 'x'.repeat(1000000) })).length < 4200)
 })
@@ -47,9 +71,9 @@ test('MVU diagnostics distinguish script subscriptions from persisted initial va
     await store.record('s', { stage: 'mvu-load', diagnostic })
   }
   const zip = await createMvuDiagnosticExport({ sessionId: 's', store })
-  assert.match(zip.buffer.toString(), /initialization-waiting/)
-  assert.match(zip.buffer.toString(), /initial-variables/)
-  assert.doesNotMatch(zip.buffer.toString(), /DO_NOT_LOG/)
+  assert.match(zipText(zip.buffer), /initialization-waiting/)
+  assert.match(zipText(zip.buffer), /initial-variables/)
+  assert.doesNotMatch(zipText(zip.buffer), /DO_NOT_LOG/)
 })
 
 test('真实日志 RPC 保留加载字段；诊断写盘失败不向运行路径抛错', async () => {
@@ -76,6 +100,7 @@ test('诊断记录持久化、限量，并移除凭据', async () => {
   const data = storage()
   const store = createMvuDiagnosticStore(data, { maxRecords: 3 })
   for (let n = 0; n < 5; n++) await store.record('s1', { stage: 'runtime', diagnosticId: 'op:1', n, apiKey: 'SECRET', message: 'Bearer SECRET https://host/x?token=SECRET' })
+  await store.flush()
   const exported = await createMvuDiagnosticStore(data, { maxRecords: 3 }).read('s1')
   assert.equal(exported.records.length, 3)
   assert.equal(exported.dropped, 2)
@@ -83,6 +108,25 @@ test('诊断记录持久化、限量，并移除凭据', async () => {
   assert.equal((await store.read('s2')).records.length, 0)
   assert.doesNotMatch(JSON.stringify(redactDiagnostic({ Authorization: 'SECRET', nested: { password: 'SECRET' } })), /SECRET/)
   assert.doesNotMatch(redactDiagnostic('request {"apiKey":"SECRET"} https://user:SECRET@host/?signature=SECRET'), /SECRET/)
+})
+
+test('V3 diagnostic export reads and closes native read handles, including failures', async () => {
+  const closed = [], opened = []
+  const result = await createMvuDiagnosticExport({ sessionId: 's1', backgroundSessionIds: ['broken'], store: createMvuDiagnosticStore(storage()),
+    persistence: { async open(id, mode) {
+      opened.push([id, mode])
+      return { header: { id, version: 3 }, inheritedEventCount: 0,
+        async read(offset) { assert.equal(offset, 0); if (id === 'broken') throw Error('read failed'); return { events: [{ type: 'user/message', seq: 0, data: { text: 'diagnostic-story', apiKey: 'PRIVATE' } }] } },
+        async close() { closed.push(id) }
+      }
+    } }
+  })
+  assert.deepEqual(opened, [['s1', 'read'], ['broken', 'read']])
+  assert.deepEqual(closed, ['s1', 'broken'])
+  const text = zipText(result.buffer)
+  assert.match(text, /diagnostic-story/)
+  assert.match(text, /Session 日志读取失败：broken/)
+  assert.doesNotMatch(text, /PRIVATE/)
 })
 
 test('诊断包同时导出前台、后台日志和 MVU 记录，缺失日志明确标注', async () => {
@@ -97,7 +141,7 @@ test('诊断包同时导出前台、后台日志和 MVU 记录，缺失日志明
   assert.deepEqual(flushed, ['s1', 'bg', 'missing'])
   assert.equal(result.filename, 'dsh-tavern-diagnostics-s1.zip')
   assert.equal(result.buffer.readUInt32LE(0), 0x04034b50)
-  const text = result.buffer.toString('utf8')
+  const text = zipText(result.buffer)
   assert.match(text, /mvu\/diagnostics.json/)
   assert.match(text, /subagents\/bg\/session.jsonl/)
   assert.match(text, /missing/)
@@ -127,7 +171,7 @@ test('超长诊断明确标记截断，日志 ZIP 保留子任务及图片附件
     persistence: { readRaw: async id => ({ content: JSON.stringify({ type: 'assistant/message', id, content: [{ type: 'image', attachment: ref }] }) }) },
     attachments: { readImage: async reference => { assert.equal(reference.attachmentId, 'img1'); return { data: Buffer.from('image bytes') } } }
   })
-  const text = result.buffer.toString('utf8')
+  const text = zipText(result.buffer)
   assert.match(text, /subagents\/child\/session.jsonl/)
   assert.match(text, /media\/img1.png/)
   assert.equal(text.split('image bytes').length - 1, 1)
@@ -188,8 +232,8 @@ test('真实 iframe bootstrap 捕获 console.warn 和 toastr，带事件编号�
   const document = client.buildTavernHelperScriptDocument({ token: 'test', scripts: [{ id: 'guard' }], context: { messages: [] } })
   // Execute the production document, replacing only the unrelated packaged module import.
   const bootstrap = document.match(/<script data-dsh-tavern-helper-script>([\s\S]*?)<\/script>/)[1]
-    .replace('import("/api/dsh-tavern/vendor/runtime-assets/zod/index.mjs")', 'Promise.resolve({})')
-    .replace('import("/api/dsh-tavern/vendor/runtime-assets/yaml/index.mjs")', 'Promise.resolve({})')
+    .replace('import(new URL("/api/dsh-tavern/vendor/runtime-assets/zod/index.mjs",document.baseURI).href)', 'Promise.resolve({})')
+    .replace('import(new URL("/api/dsh-tavern/vendor/runtime-assets/yaml/index.mjs",document.baseURI).href)', 'Promise.resolve({})')
   const messages = [], listeners = new Map()
   const parent = { postMessage: value => messages.push(value) }
   const sandbox = { parent, console: { info() {}, warn() {}, error() {} }, structuredClone, setTimeout, clearTimeout,
@@ -220,15 +264,15 @@ test('真实 iframe bootstrap 捕获 console.warn 和 toastr，带事件编号�
 
 test('诊断包包含界面按钮错误并脱敏', async () => {
   const result = await createMvuDiagnosticExport({ sessionId: 's', store: createMvuDiagnosticStore(storage()), displayDiagnostics: { frames: [{ turn: 1, console: [{ level: 'error', args: [{ message: 'journey failed', token: 'PRIVATE_TOKEN' }] }] }] } })
-  assert.match(result.buffer.toString(), /display\/diagnostics.json/)
-  assert.match(result.buffer.toString(), /journey failed/)
-  assert.doesNotMatch(result.buffer.toString(), /PRIVATE_TOKEN/)
+  assert.match(zipText(result.buffer), /display\/diagnostics.json/)
+  assert.match(zipText(result.buffer), /journey failed/)
+  assert.doesNotMatch(zipText(result.buffer), /PRIVATE_TOKEN/)
 })
 
 test('现有日志 ZIP 包含独立更新诊断，不要求当前会话触发更新', async () => {
   const result = await createMvuDiagnosticExport({ sessionId: 's', store: createMvuDiagnosticStore(storage()), updateDiagnostics: { version: 1, records: [{ event: 'github.version.failed', cause: { code: 'ETIMEDOUT' } }] } })
-  assert.match(result.buffer.toString(), /update\/diagnostics.json/)
-  assert.match(result.buffer.toString(), /ETIMEDOUT/)
+  assert.match(zipText(result.buffer), /update\/diagnostics.json/)
+  assert.match(zipText(result.buffer), /ETIMEDOUT/)
 })
 
 test('initialization timings retain bounded phase counters in exported logs without payloads', async () => {
@@ -243,8 +287,8 @@ test('initialization timings retain bounded phase counters in exported logs with
   const store = createMvuDiagnosticStore(storage())
   await store.record('timing-session', { stage: 'mvu-load', diagnostic: value })
   const exported = await createMvuDiagnosticExport({ sessionId: 'timing-session', store })
-  assert.ok(exported.buffer.toString().includes('prompt-drain'))
-  assert.ok(exported.buffer.toString().includes('oldestPendingMs'))
+  assert.ok(zipText(exported.buffer).includes('prompt-drain'))
+  assert.ok(zipText(exported.buffer).includes('oldestPendingMs'))
 })
 
 test('diagnostic ZIP includes card scripts and bound worldbook with credential redaction', async () => {
@@ -253,7 +297,7 @@ test('diagnostic ZIP includes card scripts and bound worldbook with credential r
     extensions: { helperScripts: [{ id: 'broken-script', content: 'const broken = {;' }], apiKey: 'PRIVATE_CARD_KEY' },
     worldbook: { document: { entries: { 0: { content: '世界书测试内容' } } } }
   } })
-  const text = result.buffer.toString()
+  const text = zipText(result.buffer)
   assert.match(text, /card\/context.json/)
   assert.match(text, /const broken = \{;/)
   assert.match(text, /世界书测试内容/)
@@ -262,8 +306,8 @@ test('diagnostic ZIP includes card scripts and bound worldbook with credential r
 
 test('oversized card does not prevent exporting diagnostic logs', async () => {
   const result = await createMvuDiagnosticExport({ sessionId: 's', store: createMvuDiagnosticStore(storage()), cardDiagnostics: { card: { first_mes: 'x'.repeat(8 * 1024 * 1024) } } })
-  assert.match(result.buffer.toString(), /人物卡资料超过 8 MiB/)
-  assert.match(result.buffer.toString(), /mvu\/diagnostics.json/)
+  assert.match(zipText(result.buffer), /人物卡资料超过 8 MiB/)
+  assert.match(zipText(result.buffer), /mvu\/diagnostics.json/)
   assert.ok(result.buffer.length < 100000)
 })
 
@@ -278,7 +322,37 @@ test('模块加载详情只保留限量脱敏资源和 HTTP 状态', async () =>
   const store=createMvuDiagnosticStore(storage());
   await store.record('s',{stage:'script-runtime',diagnostic:{moduleFailure:detail}});
   const zip=await createMvuDiagnosticExport({sessionId:'s',store});
-  assert.match(zip.buffer.toString(),/module-load/);
-  assert.match(zip.buffer.toString(),/404/);
-  assert.doesNotMatch(zip.buffer.toString(),/PRIVATE/);
+  assert.match(zipText(zip.buffer),/module-load/);
+  assert.match(zipText(zip.buffer),/404/);
+  assert.doesNotMatch(zipText(zip.buffer),/PRIVATE/);
 });
+
+test('诊断包包含本局预设与正则并脱敏，过大时仍可导出其他日志', async () => {
+  const result = await createMvuDiagnosticExport({sessionId:'s',store:createMvuDiagnosticStore(storage()),presetDiagnostics:{
+    preset:{presetName:'本局预设',apiKey:'PRIVATE_PRESET_KEY'},regex:{ordered:[{source:'preset',rule:{findRegex:'/x/g',replaceString:'<div>状态栏</div>'}}]}
+  }})
+  const text=zipText(result.buffer)
+  assert.match(text,/preset\/context.json/)
+  assert.match(text,/本局预设/)
+  assert.match(text,/<div>状态栏<\/div>/)
+  assert.doesNotMatch(text,/PRIVATE_PRESET_KEY/)
+  const large=await createMvuDiagnosticExport({sessionId:'s',store:createMvuDiagnosticStore(storage()),presetDiagnostics:{preset:{content:'x'.repeat(8*1024*1024)}}})
+  assert.match(zipText(large.buffer),/预设及正则资料超过 8 MiB/)
+  assert.match(zipText(large.buffer),/mvu\/diagnostics.json/)
+})
+
+test('写盘失败时诊断导出包含内存日志并明确标记未持久化', async t => {
+  const data = storage()
+  let failing = true
+  const store = createMvuDiagnosticStore({ ...data, updateJson(...args) {
+    if (failing) return Promise.reject(Error('disk full'))
+    return data.updateJson(...args)
+  } }, { flushDelayMs: 60000 })
+  t.after(async () => { failing = false; await store.dispose() })
+  await store.record('s', { stage: 'pending-export', token: 'DO_NOT_EXPORT' })
+  const exported = await createMvuDiagnosticExport({ sessionId: 's', store })
+  const text = zipText(exported.buffer)
+  assert.match(text, /pending-export/)
+  assert.match(text, /"persistence":"pending"/)
+  assert.doesNotMatch(text, /DO_NOT_EXPORT/)
+})

@@ -30,8 +30,12 @@ function imageDigest(image) {
 export function createSceneImageReferences({ store }) {
   async function read(chatId) { return await store.readJson(pathFor(chatId)) || { version: 1, records: [] } }
   async function select({ chatId, lineage, config }) {
-    const capability = imageReferenceCapability(config), keys = new Set(lineage.map(target => target.key)), people = new Map()
+    const capability = imageReferenceCapability(config), people = new Map()
     const document = await read(chatId)
+    // Derive branch keys only when references exist, and only for their endpoints.
+    const turns = new Set(document.records.flatMap(record => [record.source.turn, record.activation.turn]))
+    const targets = document.records.length ? (typeof lineage === 'function' ? lineage(turns) : lineage) : []
+    const keys = new Set(targets.map(target => target.key))
     for (const record of document.records) {
       if (!keys.has(record.activation.key) || !keys.has(record.source.key)) continue
       people.set(record.person.id, record)

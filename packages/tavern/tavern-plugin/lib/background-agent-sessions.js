@@ -39,7 +39,13 @@ export async function executeBackgroundCompaction(agent, signal) {
     throw new Error('dsh-tavern: 后台 Agent 没有提供 /compact 命令')
   }
   const result = execution.result
-  if (result.kind !== 'success') throw new Error(str(result.text) || '后台压缩失败')
+  if (result.kind !== 'success') {
+    // The command result is intentionally generic; recover only this command's
+    // persisted failure, never an earlier compaction attempt's diagnostic.
+    const failure = execution.commandId && sessionEvents(agent.session).findLast(event =>
+      event.type === 'compaction/end' && event.data?.sourceCommandId === execution.commandId && event.data?.error)
+    throw new Error(str(result.text) || '后台压缩失败', failure ? { cause: new Error(str(failure.data.error)) } : undefined)
+  }
   return { message: str(result.text) || '后台压缩完成' }
 }
 
@@ -57,8 +63,70 @@ export function createBackgroundAgentSessions(options, task) {
   const residentSessionByParent = new Map()
   const queues = new Map()
 
+  const now = typeof options.now === 'function' ? options.now : Date.now
+  const idleMs = Number.isSafeInteger(options.residentIdleMs) && options.residentIdleMs > 0 ? options.residentIdleMs : 5 * 60 * 1000
+  const maxResidents = Number.isSafeInteger(options.maxResidentSessions) && options.maxResidentSessions > 0 ? options.maxResidentSessions : 8
+  const releasing = new Map()
+  let reapTimer, reaping, stopped = false
+
+  function scheduleReap() {
+    clearTimeout(reapTimer)
+    if (stopped || reaping) return
+    const time = now()
+    const delays = [...residentHandles.entries()].filter(([id, item]) => !activeSessions.has(id) && !queues.has(item.parentSessionId) && !releasing.has(id))
+      .map(([, item]) => Math.max(0, (item.retryAt || 0) - time, residentHandles.size > maxResidents ? 0 : item.lastUsedAt + idleMs - time))
+    if (!delays.length) return
+    reapTimer = setTimeout(() => { void reapIdle().catch(error => console.warn('dsh-tavern: 空闲后台回收失败', error)) }, Math.min(...delays))
+    reapTimer.unref?.()
+  }
+
+  async function releaseResident(id, resident) {
+    if (releasing.has(id)) return releasing.get(id)
+    const pending = Promise.resolve().then(async () => {
+      try {
+        if (typeof options.flushSession === 'function') await options.flushSession(resident.handle.agent.session)
+        await resident.handle.dispose()
+        if (residentHandles.get(id) === resident) {
+          residentHandles.delete(id)
+          requestSessions.delete(id)
+          requestContexts.delete(id)
+        }
+      } catch (error) {
+        // Keep ownership on failed durability/teardown and retry later, not in a hot loop.
+        resident.retryAt = now() + 60000
+        console.warn('dsh-tavern: 释放空闲后台 Agent 失败', id, error)
+      }
+    })
+    releasing.set(id, pending)
+    try { await pending } finally { if (releasing.get(id) === pending) releasing.delete(id) }
+  }
+
+  function reapIdle() {
+    if (reaping) return reaping
+    clearTimeout(reapTimer)
+    reaping = (async () => {
+      const candidates = [...residentHandles.entries()].sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt)
+      for (const [id, resident] of candidates) {
+        if (stopped || queues.has(resident.parentSessionId) || activeSessions.has(id)) continue
+        await enqueue(resident.parentSessionId, async () => {
+          if (stopped || residentHandles.get(id) !== resident || activeSessions.has(id) || (resident.retryAt || 0) > now()) return
+          const superseded = residentSessionByParent.get(resident.key) !== id
+          if (superseded || residentHandles.size > maxResidents || now() - resident.lastUsedAt >= idleMs) await releaseResident(id, resident)
+        })
+      }
+    })().finally(() => { reaping = null; scheduleReap() })
+    return reaping
+  }
+
   function residentKey(input) {
     return JSON.stringify([str(input.sessionId), input.task === 'image' ? 'image' : 'background'])
+  }
+
+  async function releaseSuperseded(key) {
+    for (const [id, resident] of residentHandles) {
+      if (resident.key !== key || residentSessionByParent.get(key) === id || activeSessions.has(id)) continue
+      if ((resident.retryAt || 0) <= now()) await releaseResident(id, resident)
+    }
   }
 
   function descriptorFor(input, persistent) {
@@ -83,6 +151,11 @@ export function createBackgroundAgentSessions(options, task) {
   }
 
   async function execute(input) {
+    // Resolve after the queue admits this task, then keep that selection fixed
+    // through every step of the task, even if the game setting changes meanwhile.
+    if (options.resolveModelSelection && input.task !== 'image' && input.task !== 'phone') {
+      input = { ...input, selection: await options.resolveModelSelection(input) }
+    }
     const parent = agents.get(input.sessionId)
     if (parent === undefined || parent.session === undefined) throw new Error('无法创建后台 Agent：前台会话不可用')
     const runtimeInput = Object.assign({}, input)
@@ -90,7 +163,7 @@ export function createBackgroundAgentSessions(options, task) {
       runtimeInput.backgroundTasksSnapshot = await options.resolveBackgroundTasks(input)
     }
     if (options.resolveWebSearch && input.task !== 'image' && input.task !== 'phone') {
-      runtimeInput.webSearchEnabled = await options.resolveWebSearch()
+      runtimeInput.webSearchEnabled = await options.resolveWebSearch(input)
     }
     const persistent = input.persistent === true
     const requestedSessionId = str(persistent && typeof input.resolvePersistentSessionId === 'function'
@@ -121,7 +194,7 @@ export function createBackgroundAgentSessions(options, task) {
     if (handle === undefined) {
       state = { input: runtimeInput, ctx: null }
       try {
-        if (requestedSessionId !== '') {
+        if (requestedSessionId !== '' || (persistent && residentSessionId !== '')) {
           if (typeof agents.resume !== 'function') throw new Error('当前 DSH 不支持恢复持久后台 Agent')
           try {
             handle = await agents.resume({
@@ -177,18 +250,21 @@ export function createBackgroundAgentSessions(options, task) {
         throw wrapped
       }
       if (persistent) {
-        resident = { handle, state, parentSessionId: str(input.sessionId), key }
+        resident = { handle, state, parentSessionId: str(input.sessionId), key, lastUsedAt: now() }
         residentHandles.set(traceSessionId, resident)
         residentSessionByParent.set(key, traceSessionId)
       }
     }
     state.input = runtimeInput
+    if (state.modelSelection) state.modelSelection.current = { ...input.selection }
     state.refreshConfiguredTools?.()
     activeSessions.add(traceSessionId)
     requestSessions.set(traceSessionId, handle.agent.session)
     requestContexts.set(traceSessionId, {
       scope: 'background',
       parentSessionId: str(input.sessionId),
+      selection: { ...input.selection },
+      maxTokens,
       task: str(input.task) || 'background',
       turn: Math.max(0, Number(input.turn) || 0)
     })
@@ -200,18 +276,26 @@ export function createBackgroundAgentSessions(options, task) {
         requestContexts.delete(traceSessionId)
         requestSessions.delete(traceSessionId)
         await handle.dispose()
-      }
+      } else { resident.lastUsedAt = now(); await releaseSuperseded(key) }
     }
   }
 
-  function run(input) {
-    if (input.persistent !== true) return execute(input)
-    const key = str(input.sessionId)
+  function enqueue(key, work) {
     const previous = queues.get(key) || Promise.resolve()
-    const current = previous.catch(function () {}).then(function () { return execute(input) })
+    const current = previous.catch(function () {}).then(work)
     queues.set(key, current)
     return current.finally(function () {
       if (queues.get(key) === current) queues.delete(key)
+      scheduleReap()
+    })
+  }
+
+  function run(input) {
+    if (stopped) return Promise.reject(new Error('后台 Agent 管理器已关闭'))
+    if (input.persistent !== true) return execute(input)
+    return enqueue(str(input.sessionId), () => {
+      if (stopped) throw new Error('后台 Agent 管理器已关闭')
+      return execute(input)
     })
   }
 
@@ -230,6 +314,8 @@ export function createBackgroundAgentSessions(options, task) {
 
   async function compact(input = {}) {
     const sessionId = str(input.sessionId)
+    if (stopped) throw new Error('后台 Agent 管理器已关闭')
+    if (releasing.has(sessionId)) await releasing.get(sessionId)
     if (sessionId === '') throw new Error('缺少后台 Session ID')
     if (compactAgent === null) throw new Error('当前 DSH 没有提供后台压缩能力')
     if (activeSessions.has(sessionId)) throw new Error('后台 Agent 正在执行任务，请等待完成后再压缩')
@@ -255,11 +341,17 @@ export function createBackgroundAgentSessions(options, task) {
         if (handle !== null) await handle.dispose()
       } finally {
         activeSessions.delete(sessionId)
+        if (resident) { resident.lastUsedAt = now(); await releaseSuperseded(resident.key) }
+        scheduleReap()
       }
     }
   }
 
   async function dispose() {
+    stopped = true
+    clearTimeout(reapTimer)
+    if (reaping) await reaping
+    await Promise.allSettled([...releasing.values()])
     const residents = Array.from(residentHandles.values())
     residentHandles.clear()
     residentSessionByParent.clear()
@@ -282,5 +374,5 @@ export function createBackgroundAgentSessions(options, task) {
     return count
   }
 
-  return Object.freeze({ run, owns, requestContext, requestSession, compact, cancel, dispose })
+  return Object.freeze({ run, owns, requestContext, requestSession, compact, cancel, reapIdle, dispose })
 }

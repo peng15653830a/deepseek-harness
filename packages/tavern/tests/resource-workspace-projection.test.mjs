@@ -72,3 +72,20 @@ test('不同 Session 不会互相覆盖上下文和诊断', async t => {
   assert.equal((await json(path.join(root, first.contextPath))).card.path, 'cards/A.json')
   assert.equal((await json(path.join(root, second.contextPath))).card.path, 'cards/B.json')
 })
+
+test('游玩关联保留在工作区数据中，不动态注入 system 上下文', async t => {
+  const { resourceWorkspaceContext } = await import('../tavern-plugin/lib/domain/workspace-resources.js')
+  const root = await mkdtemp(path.join(os.tmpdir(), 'tavern-debug-context-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const publisher = createResourceWorkspaceProjection({ root })
+  const result = await publisher.publish({ sessionId: 'debug', context: { mountedResources: [
+    { kind: 'play-chat', path: 'play-chat:chat-game', chatId: 'chat-game', label: '测试游戏', turn: 3 },
+    { kind: 'card', path: 'cards/test.json' }
+  ] }, diagnostics: [{ overview: '不应直接注入的正文' }] })
+  const text = resourceWorkspaceContext(root, result, '用户工作区说明')
+  assert.equal(text, '用户工作区说明')
+  const stored = await json(path.join(root, result.contextPath))
+  assert.equal(stored.mountedResources[0].path, 'play-chat:chat-game')
+  const cleared = await publisher.publish({ sessionId: 'debug', context: { mountedResources: [] } })
+  assert.equal(resourceWorkspaceContext(root, cleared, '用户工作区说明'), '用户工作区说明')
+})

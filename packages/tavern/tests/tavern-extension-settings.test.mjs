@@ -84,17 +84,14 @@ test('浏览器设置真实写入 Profile 后，销毁环境并重新加载可�
   assert.equal(reloaded.window.SillyTavern.extensionSettings.phone.size, 80)
 })
 
-test('模板就绪状态来自真实引擎，保存其他插件设置和重新加载不会丢失或持久伪造状态', async t => {
+test('模板启用设置属于用户偏好，保存和重新加载保留原值', async t => {
   const root = await mkdtemp(join(tmpdir(), 'template-settings-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const data = createProfileDataStore({ dataRoot: root })
-  const store = createTavernExtensionSettings(data, { templateRuntime: async () => ({ render() {} }) })
+  const store = createTavernExtensionSettings(data)
   const base = await store.read()
-  assert.equal(base.EjsTemplate.enabled, true)
   const saved = await store.save({ ...base, EjsTemplate: { enabled: false }, phone: { on: true } }, base)
-  assert.equal(saved.EjsTemplate.enabled, true)
-  assert.deepEqual(await data.readJson('tavern-extension-settings.json'), { phone: { on: true } })
-  assert.equal((await createTavernExtensionSettings(data, { templateRuntime: async () => ({}) }).read()).EjsTemplate.enabled, true)
-  const unavailable = createTavernExtensionSettings(data, { templateRuntime: async () => { throw new Error('init failed') } })
-  assert.equal((await unavailable.read()).EjsTemplate.enabled, false)
+  assert.equal(saved.EjsTemplate.enabled, false)
+  assert.deepEqual(await data.readJson('tavern-extension-settings.json'), saved)
+  assert.equal((await createTavernExtensionSettings(data).read()).EjsTemplate.enabled, false)
 })

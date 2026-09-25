@@ -15,10 +15,24 @@ function fixture() {
     run: options => service.run('front', options), round(n) { chat.messages.push({ role: 'assistant', turn: n }) },
     restart() { service = createAutoCompaction(deps) }, blocked: () => service.blocked(chat) }
 }
-test('default manual never follows native pressure; settings validate bounds', async () => {
+test('default manual disables only the extra joint schedule; settings validate bounds', async () => {
   assert.equal(compactionPolicy().mode, 'manual')
   for (const policy of [{ mode: 'bad' }, { rounds: 0 }, { percent: 100 }, { rounds: 1.5 }]) assert.throws(() => compactionPolicy(policy))
   const h = fixture(); h.pressure = 100; h.round(1); await h.run(); assert.deepEqual(h.calls, [])
+})
+test('idle manual checks after rollback do not write metadata and invalidate its undo revision', async () => {
+  const h = fixture()
+  h.chat.timeline.branchId = 'rolled-back'
+  h.chat._storageRevision = 23
+  h.chat.rollbackUndo = { ready: true, storageRevision: 23 }
+  h.chat.contextCompaction = { branch: 'main', operation: null }
+  let writes = 0
+  const update = h.deps.updateChat
+  h.deps.updateChat = (...args) => { writes++; return update(...args) }
+  const before = structuredClone(h.chat)
+  await h.run()
+  assert.equal(writes, 0)
+  assert.deepEqual(h.chat, before)
 })
 test('round mode counts distinct completed story turns; manual success resets baseline', async () => {
   const h = fixture(); h.policy = { mode: 'rounds', rounds: 2 }; await h.run()
@@ -47,7 +61,7 @@ test('partial failure persists across restart, manual retry only repeats failed 
   await h.run({ manual: true }); assert.deepEqual(h.calls, ['foreground', 'background', 'background'])
 })
 test('restart recovers a dispatched successful foreground from native evidence without reissuing it', async () => {
-  const h = fixture(); await h.run(); h.chat.contextCompaction.operation = { id: 'old', status: 'running', foregroundSessionId: 'front', backgroundSessionId: 'back', foreground: { status: 'dispatching', before: 7 }, background: { status: 'pending' } }
+  const h = fixture(); h.chat.contextCompaction = { operation: { id: 'old', status: 'running', foregroundSessionId: 'front', backgroundSessionId: 'back', foreground: { status: 'dispatching', before: 7 }, background: { status: 'pending' } } }
   h.restart(); await h.run(); assert.deepEqual(h.calls, ['background']); assert.equal(h.chat.contextCompaction.operation.status, 'completed')
 })
 test('scoped native policy preserves non-Tavern behavior and restores on disposal', async () => {
@@ -77,5 +91,143 @@ test('queued foreground input defers idle compression and retries at pre-step', 
   const idle = h.run(), preStep = h.run({ openTurnCompact: () => {} })
   assert.equal((await idle).status, 'deferred')
   assert.equal((await preStep).status, 'completed')
+  assert.deepEqual(h.calls, ['foreground', 'background'])
+})
+
+test('压缩失败原因进入持久警告，前后台结果保持独立', async () => {
+  const h = fixture()
+  h.deps.compact = async (_id, side) => {
+    if (side === 'foreground') throw new Error('pi-ai stream idle timeout after 300000ms')
+    return { message: '后台已压缩' }
+  }
+  await h.run({ manual: true })
+  const state = h.chat.contextCompaction
+  assert.equal(state.operation.status, 'partial')
+  assert.equal(state.operation.background.status, 'succeeded')
+  assert.match(state.warning, /前台：压缩超时：连续 5 分钟/)
+  assert.match(state.warning, /可稍后重试/)
+  assert.doesNotMatch(state.warning, /后台：压缩超时/)
+  h.restart()
+  assert.equal(h.chat.contextCompaction.warning, state.warning)
+})
+
+ test('capacity recovery clears only its stale warning below the compression threshold', async () => {
+  const h = fixture(); h.policy = { mode: 'percent', percent: 80 }; h.pressure = null;
+  await h.run(); assert.match(h.chat.contextCompaction.warning, /容量/);
+  h.pressure = 18; await h.run(); assert.equal(h.chat.contextCompaction.warning, ''); assert.deepEqual(h.calls, []);
+  h.chat.contextCompaction.warning = 'other failure'; await h.run(); assert.equal(h.chat.contextCompaction.warning, 'other failure');
+})
+
+
+test('后台摘要变长时保留未完成状态并解释原因，不附加立即重试提示', async () => {
+  const h = fixture()
+  h.deps.compact = async (_id, side) => {
+    if (side === 'background') throw new Error('summary is not smaller than the shadowed content (1931 estimated framed tokens >= 1612)')
+    return { message: '前台压缩完成' }
+  }
+  await h.run({ manual: true })
+  const state = h.chat.contextCompaction
+  assert.equal(state.operation.status, 'partial')
+  assert.equal(state.operation.foreground.status, 'succeeded')
+  assert.match(state.warning, /后台：摘要未缩短内容，已保留原始记录/)
+  assert.match(state.warning, /无需立即重复压缩/)
+  assert.doesNotMatch(state.warning, /请在更多.*重试/)
+})
+
+test('new rounds resume automatic compaction after a background failure', async () => {
+  const h = fixture(); h.policy = { mode: 'rounds', rounds: 2 }; await h.run()
+  h.round(1); h.round(2); h.fail = 'background'; await h.run()
+  await h.run(); assert.equal(h.calls.length, 2)
+  h.round(3); await h.run(); assert.equal(h.calls.length, 2)
+  h.round(4); h.fail = ''; await h.run()
+  assert.deepEqual(h.calls, ['foreground', 'background', 'foreground', 'background'])
+})
+
+test('manual retry after new history cannot reuse the old foreground receipt', async () => {
+  const h = fixture(); h.round(1); h.fail = 'background'; await h.run({ manual: true })
+  h.round(2); h.fail = ''; await h.run({ manual: true })
+  assert.deepEqual(h.calls, ['foreground', 'background', 'foreground', 'background'])
+})
+
+test('baseline includes only the rounds captured before compaction', async () => {
+  const h = fixture(); h.round(1)
+  const compact = h.deps.compact
+  h.deps.compact = async (...args) => { if (args[1] === 'background') h.round(2); return compact(...args) }
+  await h.run({ manual: true })
+  assert.deepEqual(h.chat.contextCompaction.baseline, ['1'])
+})
+
+test('retry invalidates a successful receipt when its native session grew without a story round', async () => {
+  const h = fixture(); h.fail = 'foreground'; await h.run({ manual: true })
+  h.fail = ''; h.deps.checkpoint = async id => id === 'back' ? 8 : 7
+  await h.run({ manual: true })
+  assert.deepEqual(h.calls, ['foreground', 'background', 'foreground', 'background'])
+})
+
+test('an unavailable previously successful side does not block retrying the other side', async () => {
+  const h = fixture(); h.fail = 'foreground'; await h.run({ manual: true })
+  h.fail = ''; h.deps.checkpoint = async id => { if (id === 'back') throw Error('missing background session'); return 7 }
+  await h.run({ manual: true })
+  assert.equal(h.chat.contextCompaction.operation.foreground.status, 'succeeded')
+  assert.equal(h.chat.contextCompaction.operation.background.status, 'failed')
+  assert.deepEqual(h.calls, ['foreground', 'background', 'foreground'])
+})
+
+test('native foreground protection resets round counting without clearing a background failure', async () => {
+  const h = fixture(); h.policy = { mode: 'rounds', rounds: 2 }; await h.run()
+  h.round(1); h.round(2); h.fail = 'background'; await h.run()
+  h.round(3)
+  await createAutoCompaction(h.deps).recordForeground('front')
+  assert.deepEqual(h.chat.contextCompaction.baseline, ['1', '2', '3'])
+  assert.equal(h.chat.contextCompaction.operation.background.status, 'failed')
+  h.round(4); h.fail = ''; await h.run(); assert.equal(h.calls.length, 2)
+  h.round(5); await h.run(); assert.equal(h.calls.length, 4)
+})
+
+test('manual request joining an automatic no-op still executes, concurrent clicks share the work', async () => {
+  const h = fixture()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  h.deps.policy = async () => { await gate; return { mode: 'manual' } }
+  const automatic = h.run()
+  await new Promise(resolve => setImmediate(resolve))
+  const first = h.run({ manual: true }), second = h.run({ manual: true })
+  await new Promise(resolve => setImmediate(resolve)); release()
+  await automatic
+  assert.equal((await first).status, 'completed')
+  assert.equal((await second).status, 'completed')
+  assert.deepEqual(h.calls, ['foreground', 'background'])
+})
+
+test('failed post-compaction measurement does not leave a completed operation blocking the chat', async () => {
+  const h = fixture(); h.policy = { mode: 'percent', percent: 80 }
+  let measurements = 0
+  h.deps.pressure = async () => { if (++measurements > 1) throw Error('meter unavailable'); return { percent: 90 } }
+  const result = await h.run()
+  assert.equal(result.status, 'completed')
+  assert.equal(h.chat.contextCompaction.operation.status, 'completed')
+  assert.equal(h.blocked(), false)
+  assert.match(h.chat.contextCompaction.warning, /占用.*测量|测量.*占用/)
+})
+
+test('manual retry joining an automatic failure suppression still retries the failed side', async () => {
+  const h = fixture(); h.policy = { mode: 'rounds', rounds: 1 }; await h.run(); h.round(1)
+  h.fail = 'background'; await h.run(); h.fail = ''
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  h.deps.policy = async () => { await gate; return { mode: 'rounds', rounds: 1 } }
+  const automatic = h.run(); await new Promise(resolve => setImmediate(resolve))
+  const manual = h.run({ manual: true }); await new Promise(resolve => setImmediate(resolve)); release()
+  await automatic; assert.equal((await manual).status, 'completed')
+  assert.deepEqual(h.calls, ['foreground', 'background', 'background'])
+})
+
+test('cancellation during the final measurement still publishes committed results', async () => {
+  const h = fixture(); h.policy = { mode: 'percent', percent: 80 }
+  const controller = new AbortController()
+  h.deps.pressure = async () => { controller.abort(); controller.signal.throwIfAborted() }
+  const result = await h.run({ manual: true, signal: controller.signal })
+  assert.equal(result.status, 'completed')
+  assert.equal(h.blocked(), false)
   assert.deepEqual(h.calls, ['foreground', 'background'])
 })

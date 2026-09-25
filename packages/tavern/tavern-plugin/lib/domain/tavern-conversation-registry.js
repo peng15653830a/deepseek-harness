@@ -1,3 +1,4 @@
+import { currentBackgroundSessionId, referencedBackgroundSessionIds } from './background-identity.js'
 function str(value) {
   return typeof value === 'string' ? value : (value === undefined || value === null ? '' : String(value))
 }
@@ -19,13 +20,15 @@ function chatSummary(chat, preservedLastOpenedAt = 0) {
     title: str(chat && chat.title),
     mode: str(chat && chat.mode) || 'story',
     requestMode: chat && chat.requestMode === 'sillytavern' ? 'sillytavern' : 'dsh',
+    ...(currentBackgroundSessionId(chat) === null ? {} : { backgroundSessionId: currentBackgroundSessionId(chat) }),
+    ...(Array.isArray(chat?.backgroundHistoryIds) ? { backgroundHistoryIds: chat.backgroundHistoryIds } : {}),
     updatedAt,
     lastOpenedAt: Math.max(0, Number(chat && chat.lastOpenedAt) || 0, Number(preservedLastOpenedAt) || 0) || updatedAt
   }
 }
 
 function sameSummary(left, right) {
-  return left && right && ['id', 'cardPath', 'cardName', 'title', 'mode', 'requestMode', 'updatedAt', 'lastOpenedAt'].every(function (key) { return left[key] === right[key] })
+  return left && right && JSON.stringify(left.backgroundHistoryIds || []) === JSON.stringify(right.backgroundHistoryIds || []) && ['id', 'cardPath', 'cardName', 'title', 'mode', 'requestMode', 'updatedAt', 'lastOpenedAt', 'backgroundSessionId'].every(function (key) { return left[key] === right[key] })
 }
 
 /**
@@ -65,7 +68,12 @@ export function createTavernConversationRegistry(options = {}) {
         changed = true
       }
       const index = await store.readIndex()
+      // Published links already own these chats (including intentional aliases).
+      // Only unlinked records need recovery; a new Session must not materialize
+      // every historical game while holding the shared links write lock.
+      const linkedChatIds = new Set(Object.values(current).filter(value => typeof value === 'string'))
       for (const item of chatRows(index)) {
+        if (linkedChatIds.has(item.id)) continue
         const chat = await store.readChat(item.id)
         if (chat !== undefined && str(chat.sessionId) === id) {
           current[id] = chat.id
@@ -120,6 +128,8 @@ export function createTavernConversationRegistry(options = {}) {
     const rows = chatRows(index)
     const current = rows.find(function (item) { return item && item.id === str(chat.id) })
     const summary = chatSummary(chat, current && current.lastOpenedAt)
+    const previousIds = [...(current?.backgroundHistoryIds || []), current?.backgroundSessionId, ...referencedBackgroundSessionIds(chat)].filter(id => typeof id === 'string' && id && id !== summary.backgroundSessionId)
+    if (previousIds.length) summary.backgroundHistoryIds = [...new Set(previousIds)].slice(-200)
     if (sameSummary(current, summary)) return summary
     await store.writeIndex(Object.assign({}, index || {}, { chats: rows.filter(function (item) { return !item || item.id !== summary.id }).concat([summary]) }))
     return summary
@@ -135,7 +145,7 @@ export function createTavernConversationRegistry(options = {}) {
       const summary = summaries.get(chatId)
       if (!summary) continue
       const normalized = chatSummary(summary)
-      rows.push({ sessionId, chatId, cardPath: normalized.cardPath, cardName: normalized.cardName, title: normalized.title, mode: normalized.mode, requestMode: normalized.requestMode, updatedAt: normalized.updatedAt, lastOpenedAt: normalized.lastOpenedAt })
+      rows.push({ sessionId, chatId, ...(normalized.backgroundHistoryIds ? { backgroundHistoryIds: normalized.backgroundHistoryIds } : {}), ...(typeof normalized.backgroundSessionId === 'string' ? { backgroundSessionId: normalized.backgroundSessionId } : {}), cardPath: normalized.cardPath, cardName: normalized.cardName, title: normalized.title, mode: normalized.mode, requestMode: normalized.requestMode, updatedAt: normalized.updatedAt, lastOpenedAt: normalized.lastOpenedAt })
     }
     rows.sort(function (left, right) { return right.lastOpenedAt - left.lastOpenedAt || right.updatedAt - left.updatedAt })
     return rows

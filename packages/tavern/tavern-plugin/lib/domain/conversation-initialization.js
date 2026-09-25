@@ -1,11 +1,12 @@
-import { sessionEvents } from './session-events.js'
+import { sessionEvents, appendSessionEvent } from './session-events.js'
 import { createHash } from 'node:crypto'
 import { cardOpeningChoices, resolveCardOpening } from './card-openings.js'
 import { projectAgentContent, projectOpeningCommit } from './runtime-content-projection.js'
 import { OFFICIAL_MVU_VERSION } from './official-mvu-assets.js'
 import { createScriptContinuity } from './script-continuity.js'
 import { bindSceneWorldbook } from './scene-worldbook.js'
-import { snapshotBackgroundModel } from './background-model-selection.js'
+import { normalizeBackgroundModel } from './background-model-selection.js'
+import { normalizeBackgroundTasks } from './tavern-settings.js'
 import { ensureSessionSeedTrajectory } from './session-seed-trajectory.js'
 
 function str(value) { return value === undefined || value === null ? '' : String(value) }
@@ -140,14 +141,21 @@ export function createConversationInitialization(options) {
     if (cardEditExperiment) chat.cardEditContext = { version: 1 }
     if (preparation && groupOfMode(chatMode) === 'play') chat.openingWorldbookSnapshot = structuredClone(preparation.worldbookSnapshot)
     // The sidebar setting is the sole opt-in; opening previews and legacy clients cannot override it.
-    const profile = (groupOfMode(chat.mode) === 'play' || chat.cardEditContext?.version === 1) && options.userPreferenceProfile
+    let profile = (groupOfMode(chat.mode) === 'play' || chat.mode === 'card') && options.userPreferenceProfile
       ? await options.userPreferenceProfile.read()
       : null
-    chat.userProfileEnabled = profile?.hasConfirmed === true && profile.defaultEnabled === true
-    chat.webSearchEnabled = groupOfMode(chat.mode) === 'play' && currentSettings.webSearchEnabled === true
-    chat.backgroundModelSelection = groupOfMode(chat.mode) === 'play'
-      ? snapshotBackgroundModel(currentSettings.backgroundModel)
-      : null
+    if (profile && groupOfMode(chat.mode) === 'play' && Object.hasOwn(profile, 'defaultProfileId')) {
+      profile = profile.defaultProfileId ? { ...await options.userPreferenceProfile.read(profile.defaultProfileId), defaultEnabled: true } : null
+    }
+    chat.userProfileId = profile?.profileId || 'default'
+    chat.userProfileEnabled = (groupOfMode(chat.mode) === 'play' || chat.cardEditContext?.version === 1) && profile?.hasConfirmed === true && profile.defaultEnabled === true
+    chat.webSearchEnabled = false
+    chat.sceneImagesEnabled = false
+    chat.conversationFeaturesVersion = 1
+    chat.backgroundModelSelection = groupOfMode(chat.mode) === 'play' ? normalizeBackgroundModel(currentSettings.defaultBackgroundModel) : null
+    chat.disabledWritingSkills = groupOfMode(chat.mode) === 'play' ? [...(currentSettings.defaultDisabledWritingSkills || [])] : []
+    chat.backgroundConfigVersion = 1
+    chat.backgroundTasks = normalizeBackgroundTasks({})
     chat.mvu = usesMvu ? {
       enabled: true,
       owner: 'official',
@@ -211,6 +219,9 @@ export function createConversationInitialization(options) {
       chat.openingText = ''
       delete chat.sceneOpeningWorldbook
       return chat
+    }
+    if (openingTarget && groupOfMode(chat.mode) === 'play' && currentSettings.defaultForegroundModel) {
+      await native.selectModel(openingTarget, currentSettings.defaultForegroundModel)
     }
     await chats.publish(chat)
     if (hasSession) await appendNativeOpening(sessionId, chat, card, openingTarget)
@@ -278,8 +289,8 @@ export function createConversationInitialization(options) {
         if (existing.type !== type || existing.data?.turn !== 1 || (data.step !== undefined && existing.data.step !== 1)) throw new Error('开场白事件不完整且已被其他操作推进，拒绝重复写入')
         continue
       }
-      if (intent) session.append(type, data, intent)
-      else session.append(type, data)
+      if (intent) appendSessionEvent(session, type, data, intent)
+      else appendSessionEvent(session, type, data)
     }
   }
 

@@ -34,6 +34,7 @@ export function forkConversationChat(source, options = {}) {
   const chat = clone(source)
 
   delete chat._storageRevision
+  delete chat.regenRecovery
   delete chat.regenInProgress
   chat.id = targetChatId
   chat.sessionId = targetSessionId

@@ -1,4 +1,4 @@
-import { sessionEvents } from './session-events.js'
+import { ensureSessionSystemHead, sessionEvents, appendSessionEvent } from './session-events.js'
 
 const VERSION = 1
 const TEXT = Object.freeze([
@@ -70,6 +70,7 @@ function visibleEvents(session) {
 
 function ensure(session, mode) {
   if (!session || typeof session.append !== 'function' || str(session.id) === '') throw new Error('无法写入 Session 种子轨迹')
+  ensureSessionSystemHead(session)
   const stages = sessionSeedTrajectoryMessages(session.id, mode)
   const expectedIds = stages.map((_, index) => id(session.id, index))
   const events = visibleEvents(session)
@@ -86,7 +87,7 @@ function ensure(session, mode) {
 
   for (let index = matched; index < stages.length; index += 1) {
     const stage = stages[index]
-    session.append(stage.type, stage.data, stage.intent)
+    appendSessionEvent(session, stage.type, stage.data, stage.intent)
   }
   const complete = visibleEvents(session).slice(offset, offset + stages.length)
   if (complete.length !== stages.length || complete.some((event, index) => messageId(event) !== expectedIds[index])) {

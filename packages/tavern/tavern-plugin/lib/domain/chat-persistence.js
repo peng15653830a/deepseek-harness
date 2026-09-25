@@ -93,6 +93,23 @@ function mergeValue(base, latest, desired, path, chatId) {
   throw conflict(chatId, path)
 }
 
+// A reused draft must describe its new storage revision, including fields
+// merged from other writers. Preserve edits made by its owner during the await.
+function refreshDraft(input, desired, saved) {
+  for (const key of new Set([...Object.keys(desired), ...Object.keys(saved)])) {
+    const before = Object.hasOwn(desired, key) ? desired[key] : MISSING
+    const after = Object.hasOwn(saved, key) ? saved[key] : MISSING
+    if (same(before, after)) continue
+    const current = Object.hasOwn(input, key) ? input[key] : MISSING
+    if (object(current) && object(before) && object(after)) {
+      refreshDraft(current, before, after)
+    } else if (same(current, before)) {
+      if (after === MISSING) delete input[key]
+      else input[key] = clone(after)
+    }
+  }
+}
+
 /**
  * Persist the authoritative Tavern Chat with optimistic three-way merging.
  * Callers keep a small read/write interface; revision tracking, stale-write
@@ -104,6 +121,7 @@ export function createChatPersistence(options = {}) {
   const normalize = typeof options.normalize === 'function' ? options.normalize : function (value) { return value }
   const now = typeof options.now === 'function' ? options.now : Date.now
   const baselines = new Map()
+  let baselineBytes = 0
 
   function relative(chatId) {
     const id = String(chatId || '')
@@ -125,7 +143,21 @@ export function createChatPersistence(options = {}) {
     if (!chat || typeof chat !== 'object') return chat
     const revision = Math.max(0, Number(chat[STORAGE_REVISION]) || 0)
     chat[STORAGE_REVISION] = revision
-    baselines.set(chat.id + ':' + revision, clone(chat))
+    // Journal revisions are durable: reconstruct a baseline only for a stale
+    // write. Legacy stores have no revision reader, so keep a bounded fallback.
+    if (typeof records.readRevision !== 'function') {
+      const key = chat.id + ':' + revision
+      if (!baselines.has(key)) {
+        const bytes = JSON.stringify(chat).length * 2
+        if (bytes <= 16 * 1024 * 1024) {
+          baselines.set(key, {value:clone(chat),bytes}); baselineBytes += bytes
+          while (baselines.size > 8 || baselineBytes > 16 * 1024 * 1024) {
+            const oldest = baselines.keys().next().value
+            baselineBytes -= baselines.get(oldest).bytes; baselines.delete(oldest)
+          }
+        }
+      }
+    }
     return chat
   }
 
@@ -141,8 +173,8 @@ export function createChatPersistence(options = {}) {
     const chatId = String(desired.id)
     const touchUpdatedAt = metadata.touchUpdatedAt !== false
     const basedOn = Math.max(0, Number(desired[STORAGE_REVISION]) || 0)
-    const baseline = baselines.get(chatId + ':' + basedOn)
-    const saved = await records.update(chatId, function (stored) {
+    let baseline = baselines.get(chatId + ':' + basedOn)?.value
+    const saved = await records.update(chatId, async function (stored) {
       if (stored === undefined) {
         if (basedOn !== 0) throw conflict(chatId, '<deleted>')
         desired[STORAGE_REVISION] = 1
@@ -155,6 +187,11 @@ export function createChatPersistence(options = {}) {
       if (latestRevision === basedOn) {
         next = desired
       } else {
+        if (baseline === undefined && typeof records.readRevision === 'function') {
+          try { baseline = await records.readRevision(chatId, basedOn) }
+          catch (error) { if (error.code !== 'DSH_TAVERN_REVISION_NOT_FOUND') throw error }
+          if (baseline !== undefined) baseline = normalize(baseline)
+        }
         if (baseline === undefined) throw conflict(chatId, '<baseline>')
         next = mergeValue(baseline, latest, desired, '', chatId)
       }
@@ -165,6 +202,7 @@ export function createChatPersistence(options = {}) {
       return next
     }, metadata)
     const normalized = remember(normalize(clone(saved)))
+    refreshDraft(input, desired, normalized)
     input[STORAGE_REVISION] = normalized[STORAGE_REVISION]
     input.updatedAt = normalized.updatedAt
     return normalized
@@ -197,10 +235,27 @@ export function createChatPersistence(options = {}) {
     return typeof records.version === 'function' ? await records.version(chatId) : ''
   }
 
+  async function readSlice(chatId, indices=[]) {
+    if(!records.readSlice)return undefined
+    const selected=await records.readSlice(chatId,indices)
+    return selected ? {...selected,chat:normalize(selected.chat)} : undefined
+  }
+  async function readChangedSlice(chatId, revision) {
+    const selected = await records.readChangedSlice?.(chatId, revision)
+    return selected ? {...selected, chat: normalize(selected.chat)} : undefined
+  }
+  // Returns metadata only. Callers cannot accidentally retain another complete history.
+  async function patch(chatId, revision, changes, metadata={}) {
+    if(!records.patch)return undefined
+    if(changes.some(c=>['_storageRevision','updatedAt','id'].includes(c.path?.[0])))throw new Error('Reserved journal patch field')
+    return await records.patch(chatId,revision,[...changes,{op:'set',path:['_storageRevision'],value:revision+1},
+      ...(metadata.touchUpdatedAt===false?[]:[{op:'set',path:['updatedAt'],value:now()}])],metadata)
+  }
+
   async function remove(chatId) {
-    baselines.forEach(function (_value, key) { if (key.startsWith(String(chatId) + ':')) baselines.delete(key) })
+    baselines.forEach(function (entry, key) { if (key.startsWith(String(chatId) + ':')) { baselineBytes -= entry.bytes; baselines.delete(key) } })
     await records.remove(chatId)
   }
 
-  return Object.freeze({ read, readRevision, write, update, version, remove })
+  return Object.freeze({ read, readSlice, readChangedSlice, patch, readRevision, write, update, version, remove })
 }

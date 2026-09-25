@@ -1,5 +1,6 @@
+import { createForegroundWorldbook } from '../tavern-plugin/lib/domain/foreground-worldbook.js'
 import { projectWorldBookTemplates } from '../tavern-plugin/lib/domain/worldbook-recall.js'
-import { TavernPromptTemplateRuntime } from '../tavern-plugin/lib/domain/tavern-prompt-template-runtime.js'
+import { UpstreamTemplateRuntime } from './fixtures/upstream-template-runtime.mjs'
 import test from 'node:test'
 import { createContextPlanner } from '../tavern-plugin/lib/domain/context-planner.js'
 import assert from 'node:assert/strict'
@@ -86,19 +87,19 @@ test('concurrent requests cannot reuse an operation for different content',async
 })
 
 test('import rebuilds card instructions and worldbook context against each historical state', async () => {
- const h=fixture(), seen=[], runtime=await TavernPromptTemplateRuntime.create()
+ const h=fixture(), seen=[], runtime=await UpstreamTemplateRuntime.create()
  h.options.cards.read=async()=>({name:'card',system_prompt:'Card special rule',post_history_instructions:'Card writing constraint'})
  h.options.worldBooks.bound=async()=>({view:{entries:[{comment:'[initvar]',content:'hp: 10'},
-  {ref:'walking',enabled:true,primaryKeys:['opening'],content:'Opening worldbook rule'},
+  {ref:'walking',enabled:true,primaryKeys:['/\\bwalk\\b/'],content:'Opening worldbook rule'},
   {ref:'resting',enabled:true,primaryKeys:['walked'],content:'Walked worldbook rule'},
   {ref:'template',enabled:true,constant:true,content:'<% print("Historical HP " + getvar("stat_data.hp")) %>'}]}})
  h.options.projectWorldBookTemplates=async(chat)=>{
   const hp=chat.messages.at(-1)?.variables?.[0]?.stat_data.hp
   seen.push(hp)
-  return projectWorldBookTemplates({chat, card:await h.options.cards.read(), worldBook:await h.options.worldBooks.bound(), runtime})
+  return await projectWorldBookTemplates({chat, card:await h.options.cards.read(), worldBook:await h.options.worldBooks.bound(), runtime})
  }
  await createChatHistoryImportService(h.options).import(input)
- const frames=h.session.deriveMessages().filter(m=>m.source?.form==='foreground-frame').map(m=>m.content[0].text)
+ const frames=foregroundContexts(h.session)
  assert.equal(frames.length,2)
  assert.match(frames[0],/Opening worldbook rule/)
  assert.doesNotMatch(frames[0],/Walked worldbook rule/)
@@ -111,4 +112,117 @@ test('import rebuilds card instructions and worldbook context against each histo
  assert.ok(before.worldBookReads.walking)
  assert.equal(before.worldBookReads.resting,undefined)
 
+})
+
+
+test('历史导入复用正式世界书投影，当前输入不重复占用扫描窗口，蓝绿灯一起编排', async () => {
+ const h=fixture(), runtime=await UpstreamTemplateRuntime.create()
+ const worldBook={view:{entries:[{comment:'[initvar]',content:'hp: 10',enabled:false},
+  {ref:'open',constant:true,content:'<角色库>',order:10},
+  {ref:'role',primaryKeys:['/\\bwalk\\b/'],content:'开场角色',order:20},
+  {ref:'close',constant:true,content:'</角色库>',order:30}]}}
+ h.options.worldBooks.bound=async()=>worldBook
+ h.options.projectForegroundWorldbook=createForegroundWorldbook({bound:async()=>worldBook,runtime:async()=>runtime,globalVariables:async()=>({})})
+ await createChatHistoryImportService(h.options).import(input)
+ const frames=foregroundContexts(h.session)
+ assert.match(frames[0],/<角色库>\n\n开场角色\n\n<\/角色库>/)
+ assert.doesNotMatch(frames[1],/开场角色/)
+ assert.match(frames[1],/<角色库>\n\n<\/角色库>/)
+})
+
+for (const textOnly of [false,true]) test(`历史导入装配真实筛选器仍不调用 Agent（textOnly=${textOnly}）`, async()=>{
+ const h=fixture(), runtime=await UpstreamTemplateRuntime.create()
+ const {createWorldbookFilter}=await import('../tavern-plugin/lib/domain/worldbook-filter.js')
+ let calls=0
+ const worldBook={view:{entries:[{comment:'[initvar]',content:'hp: 10',enabled:false},
+  ...['walk','rest'].flatMap(word=>Array.from({length:6},(_,i)=>({ref:word+i,enabled:true,primaryKeys:[word],content:`${word} rule ${i}`})))]}}
+ const project=createForegroundWorldbook({bound:async()=>worldBook,runtime:async()=>runtime,globalVariables:async()=>({}),
+  filterCandidates:createWorldbookFilter({selection:()=>({}),beginTask:async()=>({participantRequest:{},fail:async()=>{}}),runAgent:async()=>{calls++;throw Error('model transport reached')}})})
+ h.options.worldBooks.bound=async()=>worldBook;h.options.projectForegroundWorldbook=project
+ await createChatHistoryImportService(h.options).import({...input,textOnly})
+ assert.equal(calls,0)
+ const frames=foregroundContexts(h.session)
+ assert.match(frames[0],/walk rule/);assert.match(frames[1],/rest rule/)
+ await project({chat:{id:'live',sessionId:'session',messages:[]},card:{},userText:'walk',worldBook})
+ assert.equal(calls,1,'正常生成仍走真实模型筛选器')
+})
+
+test('世界书投影失败时明确指出历史轮次，不发布残缺导入，修复后可重试',async()=>{
+ const h=fixture()
+ h.options.projectForegroundWorldbook=async()=>({context:'',error:'worldbook unavailable'})
+ await assert.rejects(createChatHistoryImportService(h.options).import(input),/第 2 轮.*worldbook unavailable/)
+ assert.equal(h.publishes,0)
+ assert.equal(h.session.deriveMessages().length,0)
+ h.options.projectForegroundWorldbook=async()=>({context:'restored'})
+ await createChatHistoryImportService(h.options).import(input)
+ assert.equal(h.publishes,1)
+})
+
+test('条目模板报错不能无提示丢弃历史上下文',async()=>{
+ const h=fixture(),runtime=await UpstreamTemplateRuntime.create()
+ const worldBook={view:{entries:[{ref:'broken',constant:true,content:'<% throw new Error("broken template") %>'}]}}
+ h.options.projectForegroundWorldbook=createForegroundWorldbook({bound:async()=>worldBook,runtime:async()=>runtime,globalVariables:async()=>({})})
+ h.options.worldBooks.bound=async()=>worldBook
+ await assert.rejects(createChatHistoryImportService(h.options).import(input),/第 2 轮.*broken/)
+ assert.equal(h.publishes,0)
+})
+
+function foregroundContexts(session) {
+ const rounds = new Map()
+ for (const message of session.deriveMessages()) {
+  if (!['foreground-frame', 'worldbook-snapshot'].includes(message.source?.form)) continue
+  const turn = message.source.trace.turn
+  rounds.set(turn, [rounds.get(turn), ...message.content.map(block => block.text)].filter(Boolean).join('\n\n'))
+ }
+ return [...rounds.values()]
+}
+
+test('bad-save rescue uses stored text without source Session or template execution, creates no old checkpoints',async()=>{
+ const h=fixture()
+ const source={id:'broken',sessionId:'missing-native',cardPath:'card.json',mode:'script',title:'Lost game',variables:{secret:1},messages:[
+  {role:'assistant',text:'Old opening',variables:[{stat_data:{hp:99}}]},
+  {role:'user',text:'Walk'}, {role:'assistant',text:'Old story',turn:2}, {role:'user',text:'Unanswered input'}]}
+ h.records.set('broken',structuredClone(source))
+ h.options.worldBooks.bound=async()=>{throw Error('must not evaluate old worldbooks')}
+ h.options.projectForegroundWorldbook=async()=>{throw Error('must not execute historical templates')}
+ const service=createChatHistoryImportService(h.options)
+ const request={sourceChatId:'broken',operationId:'rescue-1234',sessionId:'session'}
+ h.fail()
+ await assert.rejects(service.rescue(request),/offline/)
+ assert.equal(h.publishes,0)
+ assert.deepEqual(h.records.get('broken'),source)
+ await service.rescue(request)
+ const chat=await h.chats.resolve('session')
+ assert.equal(chat.mode,'story');assert.equal(chat.mvu.enabled,false)
+ assert.deepEqual(chat.variables,{})
+ assert.equal(chat.timeline.checkpoints.length,0)
+ assert.deepEqual(chat.messages.map(m=>m.text),source.messages.map(m=>m.text))
+ assert.ok(chat.messages.every(m=>m.variables===undefined))
+ assert.equal(chat.importHistory.rescue.sourceChatId,'broken')
+ assert.deepEqual(h.records.get('broken'),source)
+ const count=sessionEvents(h.session).length
+ await service.rescue(request)
+ assert.equal(sessionEvents(h.session).length,count)
+})
+
+test('rescue carries the selected last valid MVU snapshot, reenables settlement and labels stale state',async()=>{
+ const h=fixture()
+ const snapshot={stat_data:{hp:7,inventory:['key']},schema:{type:'object'},initialized_lorebooks:{book:true}}
+ const source={id:'broken-mvu',sessionId:'missing',cardPath:'card.json',mode:'story',mvu:{enabled:true},messages:[
+  {role:'assistant',turn:1,text:'Opening'},
+  {role:'assistant',turn:2,text:'State saved',swipeId:1,variables:[{stat_data:{hp:999},schema:{}},snapshot]},
+  {role:'user',text:'Continue'}, {role:'assistant',turn:3,text:'Later text without state'}, {role:'user',text:'Pending'}]}
+ h.records.set(source.id,structuredClone(source))
+ const service=createChatHistoryImportService(h.options)
+ await service.rescue({sourceChatId:source.id,operationId:'mvu-rescue-123',sessionId:'session'})
+ const chat=await h.chats.resolve('session')
+ assert.equal(chat.mvu.enabled,true);assert.equal(chat.mvu.owner,'official')
+ assert.equal(chat.mvu.openingInitialization.status,'complete')
+ assert.equal(chat.backgroundTasks.variables,true)
+ assert.deepEqual(chat.messages.findLast(m=>m.role==='assistant').variables[0],snapshot)
+ assert.equal(chat.importHistory.rescue.mvuSnapshot.sourceTurn,2)
+ assert.equal(chat.importHistory.rescue.mvuSnapshot.laterAssistantMessages,1)
+ assert.match(chat.importHistory.warnings.join(''),/数值可能滞后/)
+ assert.equal(chat.timeline.checkpoints.length,0)
+ assert.deepEqual(h.records.get(source.id),source)
 })

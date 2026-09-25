@@ -23,11 +23,12 @@ export function createMvuSettlementReconciler(options = {}) {
 
   function retry(key, callback, error) {
     if (disposed || retries.has(key)) return
-    try { onError(error, key === '@scan' ? '' : key) } catch {}
+    try { if (error) onError(error, key === '@scan' ? '' : key) } catch {}
     const timer = schedule(async function () {
       retries.delete(key)
       if (!disposed) await callback()
     }, retryDelayMs)
+    timer?.unref?.()
     retries.set(key, timer)
   }
 
@@ -35,8 +36,14 @@ export function createMvuSettlementReconciler(options = {}) {
     if (disposed) return false
     try {
       const chat = await resolve(sessionId)
-      if (!chat || !shouldResume(chat) || !isReady(sessionId)) return false
+      if (!chat || !shouldResume(chat)) return false
+      if (!isReady(sessionId, chat)) {
+        retry(sessionId, () => wake(sessionId))
+        return false
+      }
       await resume(chat.id)
+      const latest = await resolve(sessionId)
+      if (latest && shouldResume(latest)) retry(sessionId, () => wake(sessionId))
       return true
     } catch (error) {
       retry(sessionId, () => wake(sessionId), error)

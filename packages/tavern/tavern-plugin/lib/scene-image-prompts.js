@@ -6,7 +6,7 @@ function readInstruction(name) {
   return instruction
 }
 
-// The persona is installed at session setup; task instructions are read per job.
+// Built-in defaults for standalone callers; Tavern injects the editable runtime readers.
 export const readSceneImageSystemInstruction = () => readInstruction('scene-image-system')
 export const readScenePlanInstruction = () => readInstruction('scene-plan')
 export const readSceneAdjustmentInstruction = () => readInstruction('scene-image-adjustment')

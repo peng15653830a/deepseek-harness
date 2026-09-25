@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 
 const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
 const start = source.indexOf('function TavernStopBackgroundAction(props)')
-const end = source.indexOf('function TavernMoreActions(props)', start)
+const end = source.indexOf('function TavernConversationPreset(props)', start)
 
 test('dock stop button targets current operation and disappears when idle', async () => {
   const calls = [], refresh = []

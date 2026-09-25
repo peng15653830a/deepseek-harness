@@ -53,6 +53,17 @@ process.on('SIGTERM',()=>server.close(()=>process.exit(0)));
   ownedPid = undefined
   await assert.rejects(readFile(pidFile), { code: 'ENOENT' })
   assert.match((await run('stop')).stdout, /已停止/)
+  // The real start command must clean up its detached child before it fails.
+  await writeFile(childScript, `import {writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(path.join(root, 'slow.pid'))}, String(process.pid));
+setInterval(()=>{},1000);
+`)
+  await assert.rejects(execute(process.execPath, [launcher, 'start'], {
+    env: { ...env, DSH_TAVERN_START_TIMEOUT: '0.3' }, timeout: 12000
+  }), error => error.code === 1 && /启动超时/.test(error.stderr))
+  const slowPid = Number(await readFile(path.join(root, 'slow.pid'), 'utf8'))
+  assert.throws(() => process.kill(slowPid, 0), {code:'ESRCH'})
+  await assert.rejects(readFile(pidFile), {code:'ENOENT'})
   const other = createServer((_req, res) => res.end('other service'))
   await new Promise(resolve => other.listen(port, '127.0.0.1', resolve))
   t.after(() => new Promise(resolve => other.close(resolve)))

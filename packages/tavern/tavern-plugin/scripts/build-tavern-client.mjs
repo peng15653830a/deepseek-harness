@@ -31,7 +31,11 @@ async function expand(source, seen) {
 
 export async function assembleTavernClient() {
   const template = normalized(await readFile(templatePath, 'utf8'))
-  return banner + normalized(await expand(template, new Set()))
+  // The bundle installs its stylesheet from this placeholder: substitute the text of
+  // the shipped stylesheet so one artifact carries both code and styles.
+  const css = await readFile(path.join(root, 'lib/client-assets/tavern.css'), 'utf8')
+  const expanded = await expand(template, new Set())
+  return banner + normalized(expanded.replace('__TAVERN_BUNDLED_CSS__', () => JSON.stringify(css)))
 }
 
 export async function buildTavernClient({ check = false } = {}) {

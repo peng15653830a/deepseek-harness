@@ -1,5 +1,6 @@
+import { composeTavernRegexScripts } from './card-extension-reading.js'
 import { projectTavernHostHtml } from './tavern-host-script-projection.js'
-import { cardOpeningChoices } from './card-openings.js'
+import { cardOpeningChoices, cardOpeningSwipes } from './card-openings.js'
 import { projectOpeningPreview } from './runtime-content-projection.js'
 
 function str(value) {
@@ -8,20 +9,19 @@ function str(value) {
 
 function isOpeningChooser(source) {
   // Choosers may resolve these APIs indirectly, e.g. api('setChatMessage').
-  return /\bgetChatMessages\b/.test(source) && /\bsetChatMessages?\b/.test(source)
+  return (/\bgetChatMessages\b/.test(source) && /\bsetChatMessages?\b/.test(source))
+    || (/<script\b/i.test(source) && /\bswipe\s*\.\s*to\s*\(/.test(source))
 }
 
-/** Preserve greeting UI, including capability checks; MVU initializes only after commit. */
+/** Static greeting projection; getCardOpenings attaches the preparation runtime afterwards. */
 export async function projectCardOpeningPreviews(input = {}) {
   const card = input.card && typeof input.card === 'object' ? input.card : {}
   const extensions = input.extensions && typeof input.extensions === 'object' ? input.extensions : {}
   const openings = cardOpeningChoices(card)
   const userName = str(input.userName).trim() || '你'
-  const cardRegexScripts = Array.isArray(extensions.regexScripts) ? extensions.regexScripts : []
   const presetRegexScripts = Array.isArray(input.presetRegexScripts) ? input.presetRegexScripts : []
-  const regexScripts = cardRegexScripts.concat(presetRegexScripts)
-  const swipes = [str(card.first_mes)].concat(Array.isArray(card.alternate_greetings) ? card.alternate_greetings.map(str) : [])
-  const openingIds = swipes.map((text, index) => text.trim() ? (index === 0 ? 'primary' : 'alternate:' + (index - 1)) : null)
+  const regexScripts = composeTavernRegexScripts(extensions, presetRegexScripts)
+  const { swipes, openingIds } = cardOpeningSwipes(card)
   return {
     openings: openings.map(function (opening, index) {
       const projection = projectOpeningPreview(opening.text, {

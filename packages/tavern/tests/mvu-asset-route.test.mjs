@@ -103,6 +103,15 @@ test('客户端样式不等待 Tavern 运行时初始化即可从本地发布', 
   assert.equal(asset.headers['Content-Type'], 'text/css; charset=utf-8')
   assert.equal(asset.headers['Cache-Control'], 'no-cache')
   assert.match(asset.body.toString('utf8'), /\.dsh-tavern-sidebar/)
+  for (const suffix of ['?v=20260913-preset-drag', '?v=20260913-preset-drag&retry=1']) {
+    const versioned = await request(handler, {
+      url: TAVERN_CLIENT_ASSET_PREFIX + 'tavern.css' + suffix,
+      headers: { origin: 'https://example.test' }
+    })
+    assert.equal(versioned.status, 200)
+    assert.deepEqual(versioned.headers, asset.headers)
+    assert.deepEqual(versioned.body, asset.body)
+  }
 })
 
 test('production RPC preserves Chinese snapshots and variable paths at every UTF-8 byte boundary', async () => {

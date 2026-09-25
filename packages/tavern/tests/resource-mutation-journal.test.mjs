@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -19,6 +19,7 @@ for (const failAt of [1, 2, 3]) {
     const bindings = path.join(root, '.material-bindings.json')
     await mkdir(path.dirname(oldPath), { recursive: true })
     await writeFile(oldPath, '{"name":"old"}')
+    await utimes(oldPath, 1600000000, 1600000000)
     await writeFile(bindings, '{"cards/old.json":"materials/story.txt"}')
     const crashing = createResourceMutationJournal({
       dataRoot: root,
@@ -38,6 +39,7 @@ for (const failAt of [1, 2, 3]) {
 
     await createResourceMutationJournal({ dataRoot: root }).recover()
     assert.equal(await exists(oldPath), false)
+    assert.equal((await stat(newPath)).mtimeMs, 1600000000000)
     assert.equal(await readFile(newPath, 'utf8'), '{"name":"old"}')
     assert.equal(await readFile(bindings, 'utf8'), '{"cards/new.json":"materials/story.txt"}')
   })
@@ -50,6 +52,8 @@ test('普通写入异常回滚整个旧资源图', async function (t) {
   const second = path.join(root, 'second.txt')
   await writeFile(first, 'before-a')
   await writeFile(second, 'before-b')
+  await utimes(first, 1600000000, 1600000000)
+  await utimes(second, 1600000001, 1600000001)
   let failed = false
   const journal = createResourceMutationJournal({
     dataRoot: root,
@@ -65,4 +69,6 @@ test('普通写入异常回滚整个旧资源图', async function (t) {
 
   assert.equal(await readFile(first, 'utf8'), 'before-a')
   assert.equal(await readFile(second, 'utf8'), 'before-b')
+  assert.equal((await stat(first)).mtimeMs, 1600000000000)
+  assert.equal((await stat(second)).mtimeMs, 1600000001000)
 })

@@ -1,3 +1,4 @@
+import { rescueHistoryInput, rescueHistoryNotice } from './chat-history-rescue.js'
 import { prepareWorldBookRecall } from './worldbook-recall.js'
 import { createHash } from 'node:crypto'
 import { parse as parseYaml } from 'yaml'
@@ -34,12 +35,20 @@ export function incompatibleState(expected, actual, path = '') {
   })
 }
 
-export function createChatHistoryImportService({ initialization, cards, worldBooks, store, chats, native, planner, projectWorldBookTemplates }) {
+function assertImportedWorldbook(projected) {
+  if (projected.error) throw new Error(projected.error)
+  if (projected.diagnostics?.length) {
+    throw new Error('条目模板处理失败：' + projected.diagnostics.map(item => `${item.ref || '未知条目'} (${item.code || item.kind || 'error'})`).join('、'))
+  }
+}
+
+export function createChatHistoryImportService({ initialization, cards, worldBooks, store, chats, native, planner, projectWorldBookTemplates, projectForegroundWorldbook }) {
   const pending = new Map()
   async function inspect(input) {
     const parsed = parseChatHistory(input.text)
     const card = await cards.read(input.cardPath)
     if (!card) throw new Error('人物卡不存在，请重新选择')
+    if (input.rescue) return { parsed, card, worldBook: null, incompatible: false }
     const worldBook = await worldBooks.bound(input.cardPath, card)
     let initialVariables, initialError = ''
     try { initialVariables = importInitialVariables(card, worldBook) } catch (error) { initialError = error.message }
@@ -56,7 +65,7 @@ export function createChatHistoryImportService({ initialization, cards, worldBoo
     if (!/^[a-zA-Z0-9-]{8,100}$/.test(input.operationId || '') || !input.sessionId) throw new Error('导入操作或 Session 标识无效')
     const { parsed, card, worldBook, initialVariables, initialError, incompatible } = await inspect(input)
     if (incompatible && !input.textOnly) throw new Error('变量结构与人物卡不兼容，请换卡或选择仅导入正文')
-    const identity = createHash('sha256').update(JSON.stringify([input.cardPath, parsed.digest, input.textOnly === true, input.userName || parsed.userName])).digest('hex')
+    const identity = createHash('sha256').update(JSON.stringify([input.cardPath, parsed.digest, input.textOnly === true, input.userName || parsed.userName, input.rescue || null])).digest('hex')
     const path = 'chat-imports/' + input.operationId + '.json'
     let journal = await store.readJson(path)
     if (journal && (journal.identity !== identity || journal.sessionId !== input.sessionId)) throw new Error('同一导入操作不能更换人物卡、内容或 Session')
@@ -67,20 +76,52 @@ export function createChatHistoryImportService({ initialization, cards, worldBoo
     }
     if (!journal) {
       const chat = await initialization.prepareImport({ cardPath: input.cardPath, sessionId: input.sessionId, userName: input.userName || parsed.userName })
-      if (chat.mvu?.enabled && (input.textOnly || parsed.messages.some(m => !m.variables)) && !initialVariables) throw new Error(initialError || '无法读取这张 MVU 卡的初始变量，请补充有效快照后重试')
+      if (input.rescue) {
+        chat.mvu = input.rescue.mvuSnapshot ? { ...chat.mvu, enabled: true, owner: 'official', runtime: 'magvarupdate' } : { enabled: false }
+        chat.variables = {}
+        chat.macroState = { userName: input.userName || parsed.userName, local: {}, global: {} }
+        chat.mode = 'story'
+        chat.scriptState = null
+        chat.backgroundTasks = { ...chat.backgroundTasks, variables: Boolean(input.rescue.mvuSnapshot) }
+      }
+      if (!input.rescue && chat.mvu?.enabled && (input.textOnly || parsed.messages.some(m => !m.variables)) && !initialVariables) throw new Error(initialError || '无法读取这张 MVU 卡的初始变量，请补充有效快照后重试')
       const plan = await buildImportedConversation(chat, parsed, {
         operationId: input.operationId, fileName: input.fileName, initialVariables, textOnly: input.textOnly === true,
         prepareFrame: async ({ chat, turn, userText }) => {
-          // Like native play, recall against the preceding body, and project
-          // templates with only the state available before this output.
-          const recalled = prepareWorldBookRecall({ chat, card, worldBook, turn: turn - 1 })
+          if (input.rescue) return { text: '以下是从损坏存档迁入的剧情文字，仅作为历史参考。' + rescueHistoryNotice(input.rescue) }
+
+          if (projectForegroundWorldbook) {
+            let projected
+            try {
+              projected = await projectForegroundWorldbook({ chat, card, userText, userTextInHistory: true, worldBook, purpose: 'history-import' })
+              assertImportedWorldbook(projected)
+            } catch (error) {
+              throw new Error(`导入第 ${turn} 轮世界书上下文失败：${error.message || error}`, { cause: error })
+            }
+            if (projected.reads) chat.worldBookReads = projected.reads
+            if (projected.randomState) chat.worldBookRandomState = projected.randomState
+            return planner.plan({ purpose: 'body', card, chat: projected.macroState ? { ...chat, macroState: projected.macroState } : chat,
+              userText, sessionId: input.sessionId, nativeTurn: turn, scriptReference: null, worldBookContext: projected.context })
+          }
+          const recalled = prepareWorldBookRecall({ chat, card, worldBook, turn: turn - 1, userText, userTextInHistory: true })
           chat.worldBookReads = recalled.recordReads(chat.worldBookReads)
-          const templates = projectWorldBookTemplates ? await projectWorldBookTemplates(chat, card) : null
+          let templates
+          try {
+            templates = projectWorldBookTemplates ? await projectWorldBookTemplates(chat, card) : null
+            if (templates) assertImportedWorldbook(templates)
+          } catch (error) {
+            throw new Error(`导入第 ${turn} 轮世界书上下文失败：${error.message || error}`, { cause: error })
+          }
           return planner.plan({ purpose: 'body', card, chat, userText, sessionId: input.sessionId,
             nativeTurn: turn, scriptReference: null,
             worldBookContext: [recalled.context, templates?.context].filter(Boolean).join('\n\n') })
         }
       })
+      if (input.rescue) {
+        plan.chat.timeline.checkpoints = []
+        plan.chat.importHistory.rescue = input.rescue
+        plan.chat.importHistory.warnings.push(rescueHistoryNotice(input.rescue))
+      }
       const checkpointInputs = plan.chat.timeline.checkpoints.map(c => ({ id: c.id, messageCount: c.importMessageCount, before: c.importBefore }))
       journal = { version: 1, identity, sessionId: input.sessionId, status: 'writing', plan, checkpointInputs }
       await store.writeJson(path, journal)
@@ -116,7 +157,7 @@ export function createChatHistoryImportService({ initialization, cards, worldBoo
     await store.writeJson(path, { version: 1, identity, sessionId: input.sessionId, status: 'ready' })
     return { sessionId: input.sessionId, mode: journal.plan.chat.mode || 'story' }
   }
-  return { preview, import(input) {
+  function importPrepared(input) {
     const key = input.operationId
     const signature = JSON.stringify(input)
     if (pending.has(key)) {
@@ -126,5 +167,12 @@ export function createChatHistoryImportService({ initialization, cards, worldBoo
     const task = perform(input).finally(() => pending.delete(key))
     pending.set(key, { signature, task })
     return task
-  } }
+  }
+  return { preview, import(input) { const { rescue, ...ordinary } = input; return importPrepared(ordinary) },
+    async rescue(input) {
+      const source = await chats.read(input.sourceChatId)
+      if (source?.sessionId === input.sessionId) throw new Error('救援必须使用新的对话')
+      return importPrepared({ ...rescueHistoryInput(source), operationId: input.operationId, sessionId: input.sessionId })
+    }
+  }
 }

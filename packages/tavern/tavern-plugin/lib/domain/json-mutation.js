@@ -119,3 +119,29 @@ export function applyJsonChanges(input, changes) {
   }
   return result
 }
+
+/** Internal immutable update: copy ancestors and changed values, share untouched branches. */
+export function applyJsonChangesShared(input, changes) {
+  let result = input
+  for (const change of changes) {
+    assertPath(change.path)
+    if (change.path.includes('__proto__')) throw new Error('Invalid mutation path')
+    const visit = (value, depth) => {
+      if (depth === change.path.length) return applyJsonChanges(value, [{...change,path:[]}])
+      if (!value || typeof value !== 'object') throw new Error('Missing mutation parent')
+      const key=change.path[depth], next=Array.isArray(value)?value.slice():{...value}
+      if(depth===change.path.length-1) {
+        if(change.op==='delete') {
+          if(Array.isArray(value)||!Object.hasOwn(value,key))throw new Error('Invalid delete')
+          delete next[key]
+        } else Object.defineProperty(next,key,{value:visit(value[key],depth+1),enumerable:true,writable:true,configurable:true})
+      } else {
+        if(!Object.hasOwn(value,key))throw new Error('Missing mutation parent')
+        Object.defineProperty(next,key,{value:visit(value[key],depth+1),enumerable:true,writable:true,configurable:true})
+      }
+      return next
+    }
+    result=visit(result,0)
+  }
+  return result
+}

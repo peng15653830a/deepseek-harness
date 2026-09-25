@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createImageConfiguration } from '../image-gen/src/configuration.js'
+import { createImageConfiguration } from '../tavern-plugin/packages/dsh-image-gen/src/configuration.js'
 import { createModuleSceneImageSettings } from '../tavern-plugin/lib/domain/scene-image-module-settings.js'
 import { comfyLinkedSeedGraph } from './fixtures/scene-image-comfy-workflow.mjs'
 

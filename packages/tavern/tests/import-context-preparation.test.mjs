@@ -7,7 +7,7 @@ import { parseChatHistory } from '../tavern-plugin/lib/domain/chat-history-impor
 import { createStoryTimeline } from '../tavern-plugin/lib/domain/story-timeline.js'
 import { createHistoryRecall } from '../tavern-plugin/lib/domain/history-recall.js'
 import { locateRollbackSurface } from '../tavern-plugin/lib/domain/rollback-surface.js'
-import { sessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
+import { sessionEvents, appendSessionEvent } from '../tavern-plugin/lib/domain/session-events.js'
 const estimateMessage = message => message.content.reduce((n,b)=>n+(b.text?.length||0),0)+8
 async function fixture() {
   const session=Session.create('context-test')
@@ -91,7 +91,7 @@ test('normal sessions bypass preparation and a native reply can roll back across
   await createImportContextPreparation({...h.options,readChat:async()=>({messages:[]})}).prepare(h.request)
   assert.equal(h.modelCalls,0)
   await createImportContextPreparation(h.options).prepare(h.request)
-  h.session.append('assistant/message',{turn:14,step:1,message:{id:'new-body',role:'assistant',content:[{type:'text',text:'New body'}],source:{kind:'model',provider:'fixture',model:'small'}}},{surfaceOp:'append',sourceEventSeqs:[]})
+  appendSessionEvent(h.session, 'assistant/message',{turn:14,step:1,message:{id:'new-body',role:'assistant',content:[{type:'text',text:'New body'}],source:{kind:'model',provider:'fixture',model:'small'}}},{surfaceOp:'append',sourceEventSeqs:[]})
   const surface=locateRollbackSurface({events:sessionEvents(h.session),nodes:h.session.surface.nodes})
   assert.equal(sessionEvents(h.session).find(e=>e.seq===surface.userSeq).data.id,'new-input')
   assert.equal(surface.turn,14)

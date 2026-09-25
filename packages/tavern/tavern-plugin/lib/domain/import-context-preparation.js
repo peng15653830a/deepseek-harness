@@ -1,4 +1,5 @@
-import { sessionEvents } from './session-events.js'
+import { replaceSessionSurface } from './session-surface-mutations.js'
+import { sessionEvents, appendSessionEvent } from './session-events.js'
 
 const PLUGIN = 'dsh-tavern-context-window'
 const eventMessage = event => event.type === 'user/message' ? event.data : event.type === 'assistant/message' ? event.data.message : null
@@ -18,7 +19,7 @@ function importedRounds(session, operationId) {
     const imported = message?.source?.importSource?.operationId === operationId
     if (event.type === 'user/message' && imported) pending = { seqs: [], ids: [] }
     if (!pending) continue
-    if (!imported && message?.source?.form !== 'foreground-frame') { pending = null; continue }
+    if (!imported && !['foreground-frame', 'worldbook-snapshot'].includes(message?.source?.form)) { pending = null; continue }
     pending.seqs.push(seq)
     pending.ids.push(message.id)
     if (event.type === 'assistant/message' && imported) {
@@ -79,10 +80,12 @@ export function createImportContextPreparation({ readChat, updateChat, getSessio
       request.signal?.throwIfAborted()
       result = planImportContext({ session, request: { ...request, maxTokens: request.maxTokens ?? info.defaultMaxTokens }, operationId: chat.importHistory.operationId, contextWindow: info.context?.contextWindow, estimateMessage })
       const { removedIds, removedSeqs, ...receipt } = result
-      session.append('user/message', { id: markerId, role: 'user', content: [],
-        source: { kind: 'plugin', plugin: PLUGIN, preparation: receipt } }, result.status === 'trimmed' ? {
-          surfaceOp: { op: 'replace', start: removedSeqs[0], end: removedSeqs.at(-1) }, sourceEventSeqs: removedSeqs
-        } : { surfaceOp: 'append' })
+      const message = { id: markerId, role: 'user', content: [],
+        source: { kind: 'plugin', plugin: PLUGIN, preparation: receipt } }
+      if (result.status === 'trimmed') replaceSessionSurface(session, 'user/message', message, {
+        start: removedSeqs[0], end: removedSeqs.at(-1), sourceEventSeqs: removedSeqs
+      })
+      else appendSessionEvent(session, 'user/message', message, { surfaceOp: 'append' })
     }
     await flush(session)
     const { removedIds, removedSeqs, ...receipt } = result

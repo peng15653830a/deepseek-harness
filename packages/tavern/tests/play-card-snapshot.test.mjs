@@ -211,3 +211,176 @@ test('migration adopts merged persistence state; another reader retains its base
   assert.equal(stored.cardContextSnapshot, '新版背景')
   assert.equal(stored.messages.length, 2)
 })
+
+test('应用新版只生成背景补丁，保留历史、变量、预设和开局用户画像', async () => {
+  const api = createPlayCardSnapshots({
+    worldBooks: { bound: async () => null }, planner: createContextPlanner({ prompt: () => '' }),
+    readCard: async () => { throw new Error('使用用户确认的卡') },
+    writeChat: async () => { throw new Error('准备补丁不能写存档') },
+    userPreferenceProfile: { stableContext: async () => { throw new Error('不得更新用户画像') } }
+  })
+  const chat = { id: 'old', mode: 'story', cardPath: 'cards/test.json', messages: Array.from({ length: 200 }, (_, turn) => ({ turn, text: '历史' })),
+    mvu: { stat_data: { health: 12 }, schema: { health: 'number' } }, runtimePresetSnapshot: { name: '原预设' },
+    userProfileEnabled: true, userProfileRevision: 3, userProfileContextSnapshot: '【用户已确认的长期偏好】\n原有偏好' }
+  const original = structuredClone(chat)
+  const patch = await api.replacement(chat, { name: '人物', description: '新版描述' })
+  assert.deepEqual(chat, original)
+  assert.match(patch.cardContextSnapshot, /新版描述/)
+  assert.match(patch.cardContextSnapshot, /原有偏好/)
+  assert.equal(patch.userProfileRevision, 3)
+  assert.equal(patch.cardContextRevision, 1)
+  assert.equal(patch.cardContentDigest.length, 64)
+  for (const key of ['messages', 'mvu', 'runtimePresetSnapshot', 'sceneOpeningWorldbook']) assert.equal(Object.hasOwn(patch, key), false)
+})
+
+test('游玩中切换画像仅修改固定前缀，保留 200 轮历史、变量与原卡背景', async () => {
+  const { Session } = await import('./fixtures/dsh-session-host.mjs')
+  const { ensureSessionStablePrefix, sessionStablePrefixSections } = await import('../tavern-plugin/lib/domain/session-stable-prefix.js')
+  let preference = { revision: 3, text: '【用户已确认的长期偏好】\n温和叙事' }
+  const snapshots = createPlayCardSnapshots({ userPreferenceProfile: { stableContext: async () => preference },
+    planner: { plan: () => { throw new Error('切换画像不得重建人物卡背景') } },
+    writeChat: () => { throw new Error('补丁不能直接写存档') } })
+  let chat = { id: 'profile-toggle', mode: 'story', cardContextSnapshotVersion: 7, cardContextSnapshot: '【故事设定 · 人物卡】\n原卡背景\n\n【常驻世界书】\n原世界书', cardContentDigest: 'old-card',
+    userProfileEnabled: false, messages: Array.from({ length: 200 }, (_, turn) => ({ turn, text: '历史' })), variables: { hp: 12 }, mvu: { enabled: true }, runtimePresetSnapshot: { id: 'preset' } }
+  const original = structuredClone(chat)
+  const session = Session.create('profile-toggle')
+  await ensureSessionStablePrefix(session, chat.cardContextSnapshot, undefined, 0)
+  const enabled = await snapshots.preferenceReplacement(chat, true)
+  assert.deepEqual(chat, original)
+  chat = { ...chat, ...enabled }
+  await ensureSessionStablePrefix(session, chat.cardContextSnapshot, undefined, chat.cardContextRevision)
+  assert.match(sessionStablePrefixSections(session).map(s => s.text).join('\n'), /温和叙事/)
+  assert.equal(chat.userProfileRevision, 3)
+  assert.equal(chat.cardContextRevision, 1)
+  assert.equal(chat.cardContentDigest, 'old-card')
+  assert.deepEqual(await snapshots.preferenceReplacement(chat, true), {}, '重复开启不破坏缓存')
+  preference = { revision: 4, text: '【用户已确认的长期偏好】\n新的偏好' }
+  const disabled = await snapshots.preferenceReplacement(chat, false)
+  chat = { ...chat, ...disabled }
+  await ensureSessionStablePrefix(session, chat.cardContextSnapshot, undefined, chat.cardContextRevision)
+  assert.equal(chat.cardContextSnapshot, original.cardContextSnapshot)
+  assert.doesNotMatch(sessionStablePrefixSections(session).map(s => s.text).join('\n'), /温和叙事|新的偏好/)
+  assert.equal(chat.userProfileRevision, 0)
+  chat = { ...chat, ...await snapshots.preferenceReplacement(chat, true) }
+  assert.equal(chat.userProfileRevision, 4)
+  assert.equal(chat.cardContextRevision, 3)
+  for (const field of ['messages', 'variables', 'mvu', 'runtimePresetSnapshot']) assert.deepEqual(chat[field], original[field])
+})
+
+test('未确认画像或快照不一致时拒绝切换，不误删人物卡背景', async () => {
+  const snapshots = createPlayCardSnapshots({ userPreferenceProfile: { stableContext: async () => null } })
+  await assert.rejects(snapshots.preferenceReplacement({ mode: 'story', cardContextSnapshot: '背景' }, true), /确认用户画像/)
+  await assert.rejects(snapshots.preferenceReplacement({ mode: 'card' }, true), /游玩会话/)
+  await assert.rejects(snapshots.preferenceReplacement({ mode: 'story', userProfileEnabled: true, cardContextSnapshot: '背景', userProfileContextSnapshot: '不匹配的偏好' }, false), /不一致/)
+})
+
+test('switching an enabled game to another named profile replaces only its pinned preference', async () => {
+  const snapshots = createPlayCardSnapshots({ userPreferenceProfile: { stableContext: async id => ({ profileId: id, revision: 9, text: '新偏好' }) } })
+  const chat = { mode: 'story', userProfileEnabled: true, userProfileId: 'a', userProfileRevision: 4,
+    userProfileContextSnapshot: '旧偏好', cardContextSnapshot: '旧偏好\n\n原卡背景', cardContextRevision: 1,
+    messages: Array.from({ length: 200 }, (_, turn) => ({ turn })), variables: { hp: 12 } }
+  const before = structuredClone(chat)
+  const patch = await snapshots.preferenceReplacement(chat, true, 'b')
+  assert.equal(patch.userProfileId, 'b')
+  assert.equal(patch.cardContextSnapshot, '新偏好\n\n原卡背景')
+  assert.equal(patch.cardContextRevision, 2)
+  assert.deepEqual(chat, before)
+  assert.equal(patch.messages, undefined)
+  assert.equal(patch.variables, undefined)
+})
+
+test('显式应用新版同步刷新常驻背景、MVU 规则和模板世界书，普通读取仍固定', async () => {
+  const { createWorldBookLibrary } = await import('../tavern-plugin/lib/domain/worldbook-library.js')
+  const { mvuUpdateRulesFromWorldBook } = await import('../tavern-plugin/lib/domain/worldbook-recall.js')
+  const card = { name: '测试', character_book: { entries: [
+    { id: 0, comment: '背景', content: '新版背景', constant: true, enabled: true, keys: [] },
+    { id: 1, comment: '[mvu_update]变量更新规则', content: '人际关系.人际网络', constant: true, enabled: true, keys: [] }
+  ] } }
+  let binding = { kind: 'default' }
+  const worldBooks = createWorldBookLibrary({ normalizePath: p => p, removeStandalone: async () => {},
+    cards: { read: async () => card }, resources: { bindingForCard: async () => binding, readText: async () => JSON.stringify({entries:{0:{uid:0,comment:"独立世界书",content:"独立新版",constant:true,disable:false,key:[]}}}) } })
+  const old = structuredClone(card.character_book)
+  old.entries[0].content = '旧版背景'
+  old.entries[1].content = '人际网络'
+  const chat = { id: 'test', mode: 'story', cardPath: 'cards/test.json', cardContextSnapshotVersion: 7,
+    cardContextSnapshot: '旧版背景', messages: [{role:'assistant',text:'历史'}], variables: {hp:12},
+    openingWorldbookSnapshot: {version:1,source:{kind:'card',cardPath:'cards/test.json'},document:old} }
+  const before = structuredClone(chat)
+  const api = createPlayCardSnapshots({worldBooks, planner:createContextPlanner({prompt:()=>''}), writeChat:async()=>{throw Error('must not save')}, readCard:async()=>card})
+  assert.equal(await api.ensure(chat,card),'旧版背景')
+  const patch = await api.replacement(chat,card)
+  assert.deepEqual(chat,before)
+  assert.match(patch.cardContextSnapshot,/新版背景/)
+  const updated = {...chat,...patch}
+  assert.match(mvuUpdateRulesFromWorldBook(await worldBooks.bound(chat.cardPath,card,updated)).join('\n'),/人际关系\.人际网络/)
+  assert.match(JSON.stringify(await worldBooks.templateSnapshot(chat.cardPath,card,updated)),/人际关系\.人际网络/)
+  assert.equal(patch.messages,undefined)
+  assert.equal(patch.variables,undefined)
+  binding = {kind:'standalone',path:'worldbooks/current.json',available:true}
+  const rebound = await api.replacement(chat,card)
+  assert.equal(rebound.openingWorldbookSnapshot.source.path,'worldbooks/current.json')
+  assert.match(rebound.cardContextSnapshot,/独立新版/)
+  binding = {kind:'standalone',path:'worldbooks/missing.json',available:false}
+  await assert.rejects(api.replacement(chat,card),/世界书不存在/)
+  assert.deepEqual(chat,before,'读取失败不应用部分更新')
+  binding = {kind:'none'}
+  const removed = await api.replacement(chat,card)
+  assert.equal(removed.openingWorldbookSnapshot.document,null)
+  assert.equal(await worldBooks.bound(chat.cardPath,card,{...chat,...removed}),null)
+})
+
+test('世界书绑定改变也提示更新，确认版本后应用且不修改剧情和变量', async () => {
+  const { cardContentDigest } = await import('../tavern-plugin/lib/domain/play-card-snapshots.js')
+  const card = { name: '人物', description: '固定背景' }
+  let book = null
+  const worldBooks = { bound: async (_path, _card, chat) => chat?.openingWorldbookSnapshot?.version === 1
+    ? { ...chat.openingWorldbookSnapshot, view: { entries: [] } } : book }
+  const api = createPlayCardSnapshots({ worldBooks, planner: createContextPlanner({ prompt: () => '' }), readCard: async () => card, writeChat: async () => {} })
+  const chat = { id: 'game', mode: 'story', cardPath: 'cards/a.json', cardContentDigest: cardContentDigest(card),
+    openingWorldbookSnapshot: { version: 1, source: null, document: null }, messages: [{ role: 'assistant', text: '原剧情' }], variables: { hp: 12 } }
+  assert.equal((await api.updateStatus(chat, card)).available, false)
+  book = { source: { kind: 'standalone', path: 'worldbooks/a.json' }, document: { entries: {} }, view: { entries: [] } }
+  const status = await api.updateStatus(chat, card)
+  assert.equal(status.available, true); assert.equal(status.cardChanged, false); assert.equal(status.worldbookChanged, true)
+  const before = structuredClone(chat)
+  const patch = await api.replacement(chat, card, status.digest)
+  assert.deepEqual(chat, before)
+  assert.equal(patch.variables, undefined); assert.equal(patch.messages, undefined)
+  assert.equal((await api.updateStatus({ ...chat, ...patch }, card)).available, false)
+  book.document.entries.changed = { content: '确认后又修改了' }
+  await assert.rejects(api.replacement(chat, card, status.digest), /再次修改/)
+  assert.deepEqual(chat, before)
+  book = null
+  assert.equal((await api.updateStatus({ ...chat, ...patch }, card)).worldbookChanged, true)
+})
+
+test('应用后本局脚本修改世界书不冒充资源库更新，库文件缺失也不破坏旧存档', async () => {
+  const card = { name: '人物' }
+  let missing = false
+  const live = { source: { kind: 'standalone', path: 'book.json' }, document: { entries: {} }, view: { entries: [] } }
+  const api = createPlayCardSnapshots({ worldBooks: { bound: async () => { if (missing) throw Error('世界书不存在'); return live } }, planner: createContextPlanner({ prompt: () => '' }) })
+  const chat = { id: 'game', mode: 'story', cardPath: 'card.json', messages: [] }
+  Object.assign(chat, await api.replacement(chat, card))
+  chat.openingWorldbookSnapshot.document.entries.local = { content: '仅本局脚本写入' }
+  assert.equal((await api.updateStatus(chat, card)).available, false)
+  live.document.entries.external = { content: '库里的更新' }
+  assert.equal((await api.updateStatus(chat, card)).worldbookChanged, true)
+  missing = true
+  const before = structuredClone(chat)
+  const status = await api.updateStatus(chat, card)
+  assert.match(status.error, /世界书不存在/)
+  assert.deepEqual(chat, before)
+})
+
+test('旧快照无源版本时只比较绑定，不把历史脚本改写误报为资源更新', async () => {
+  const { cardContentDigest } = await import('../tavern-plugin/lib/domain/play-card-snapshots.js')
+  const card = { name: '旧存档' }
+  let source = { kind: 'standalone', path: 'book.json' }
+  const api = createPlayCardSnapshots({ worldBooks: { bound: async () => ({ source, document: { entries: {} } }) } })
+  const chat = { cardContentDigest: cardContentDigest(card), openingWorldbookSnapshot: {
+    version: 1, source: structuredClone(source), document: { entries: { 0: { content: '过去脚本写入的状态' } } }
+  } }
+  assert.equal((await api.updateStatus(chat, card)).available, false)
+  source = { kind: 'standalone', path: 'new-book.json' }
+  assert.equal((await api.updateStatus(chat, card)).worldbookChanged, true)
+})

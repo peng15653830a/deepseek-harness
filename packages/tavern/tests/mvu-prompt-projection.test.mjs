@@ -24,30 +24,15 @@ test('后台只发送一份结构和真实状态，运行时 Frame、未知字�
   assert.equal(request.turnContext.split('unique-schema-marker').length - 1, 1)
   assert(request.turnContext.includes(JSON.stringify(schema)), 'structure uses compact lossless JSON')
   assert(request.turnContext.includes(input.updateRules[0]))
-  assert.match(request.turnContext, /人物设计（按需）/)
+  assert.doesNotMatch(request.turnContext, /人物设计（按需）/)
   assert.deepEqual(frame.authoritativeState.currentVariables, variables)
   assert.deepEqual(input, before)
 })
 
-test('MVU 结算允许当前后台 Agent 按需加载人物设计 Skill', () => {
-  const request = projectMvuBackgroundRequest(createMvuBackgroundTaskFrame({
-    ...input,
-    currentVariables: { stat_data: { 人物库: { $meta: { extensible: true } } } },
-    updateRules: ['人物库允许预先设计人物；设计字段为性格和外貌，状态字段为位置和在场。']
-  }))
-  assert.match(request.turnContext, /人物设计（按需）[\s\S]*tavern-character-design/)
-  assert.match(request.system, /当前后台 Agent 内先加载 tavern-character-design/)
-  assert.match(request.system, /不得创建另一个 Agent/)
-  assert.deepEqual(request.tools.map(tool => tool.name), ['posture_submit', 'character_design_read', 'character_design_save', 'mvu_submit_update'])
-  assert.doesNotMatch(request.turnContext, /# 后台人物设计/)
-})
-
-test('没有 MVU 人物库字段时，普通人物档案能力仍可按需使用', () => {
-  const request = projectMvuBackgroundRequest(createMvuBackgroundTaskFrame({
-    ...input
-  }))
-  assert.match(request.turnContext, /人物设计（按需）|tavern-character-design/)
-  assert.match(request.system, /当前后台 Agent/)
+test('旧设置开启人物设计时，MVU 结算也不自动设计或提供档案工具', () => {
+  const request = projectMvuBackgroundRequest(createMvuBackgroundTaskFrame(input))
+  assert.deepEqual(request.tools.map(tool => tool.name), ['posture_submit', 'mvu_submit_update'])
+  assert.doesNotMatch(request.turnContext, /character-design|人物设计（按需）/)
 })
 
 test('MVU 结算把取消信号传给后台 Agent', async () => {
@@ -106,4 +91,12 @@ test('失败重试反馈同样移除展示副本，不改变运行时输入、�
   assert.equal(calls, 1)
   assert.deepEqual(result.variables, after, 'runtime result retains the complete state')
   assert.deepEqual(result.frame.authoritativeState.currentVariables, variables)
+})
+
+
+test('重算指导意见只进入本次变量请求，不改写正文', () => {
+  const request = projectMvuBackgroundRequest(createMvuBackgroundTaskFrame({ ...input, guidance: '不要扣库存' }))
+  assert.match(request.turnContext, /本次重新结算.*[\s\S]*不要扣库存/)
+  assert.doesNotMatch(JSON.stringify(request.messages), /不要扣库存/)
+  assert.doesNotMatch(projectMvuBackgroundRequest(createMvuBackgroundTaskFrame(input)).turnContext, /不要扣库存/)
 })

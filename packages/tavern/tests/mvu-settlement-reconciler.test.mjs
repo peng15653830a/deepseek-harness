@@ -47,7 +47,7 @@ test('瞬时读取失败会自行退避重试，不依赖新的浏览器就绪�
   assert.equal(scheduled.length, 1)
   assert.equal(scheduled[0].delay, 25)
   await scheduled[0].callback()
-  assert.equal(reads, 2)
+  assert.equal(reads, 3)
   reconciler.dispose()
 })
 
@@ -87,5 +87,20 @@ test('未就绪时只保留持久事实，后续就绪唤醒再接续', async ()
   ready = true
   await reconciler.wake('session-1')
   assert.equal(resumes, 1)
+  reconciler.dispose()
+})
+
+test('任务已持久化但全部就绪通知丢失时仍自动接续', async () => {
+  const scheduled = []
+  let ready = false, pending = true, resumed = 0
+  const reconciler = createMvuSettlementReconciler({ list: async () => [], resolve: async () => ({ id: 'c', pending }),
+    shouldResume: chat => chat.pending, isReady: () => ready,
+    resume: async () => { resumed++; pending = false },
+    schedule: fn => { scheduled.push(fn); return scheduled.length }, cancel() {} })
+  await reconciler.wake('s')
+  assert.equal(scheduled.length, 1)
+  ready = true
+  await scheduled.shift()()
+  assert.equal(resumed, 1)
   reconciler.dispose()
 })

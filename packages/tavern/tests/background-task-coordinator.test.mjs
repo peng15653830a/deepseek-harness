@@ -332,3 +332,55 @@ test('manual interruption unlocks background and rejects late state writes and s
   assert.equal(stale.activity.busy, true);
   assert.equal(stale.activity.operationId, next.operationId);
 });
+
+test('replacement binding survives stale failure receipts and subsequent retries', async () => {
+  const h = coordinatorHarness()
+  const seed = await h.coordinator.begin(h.current(), 'settlement')
+  await seed.commit({ participant: seed.participant({ sessionId: 'old', boundary: 42 }) })
+  const task = await h.coordinator.begin(h.current(), 'settlement')
+  await task.bindSession('replacement')
+  assert.equal(h.current().timeline.participants.background.sessionId, 'replacement')
+  assert.equal(h.current().timeline.participants.background.syncedRevision, null)
+  await task.fail({ sessionId: 'old', boundary: 42 })
+  assert.equal(h.current().timeline.participants.background.sessionId, 'replacement')
+  assert.equal(h.current().timeline.participants.background.boundary, null)
+  assert.equal(h.current().timeline.participants.background.syncedRevision, null)
+  for (let n = 0; n < 3; n++) {
+    const retry = await h.coordinator.begin(h.current(), 'settlement')
+    assert.equal(retry.participantRequest.sessionId, 'replacement')
+    await retry.bindSession('replacement')
+    await retry.fail({ traceSessionId: 'replacement' })
+  }
+})
+
+test('replacement identity survives interruption before result and recovery', async () => {
+  const h = coordinatorHarness()
+  const seed = await h.coordinator.begin(h.current(), 'settlement')
+  await seed.commit({ participant: seed.participant({ sessionId: 'old', boundary: 42 }) })
+  const task = await h.coordinator.begin(h.current(), 'settlement')
+  await task.bindSession('replacement')
+  await h.coordinator.recover(h.current())
+  const retry = await h.coordinator.begin(h.current(), 'settlement')
+  assert.equal(retry.participantRequest.sessionId, 'replacement')
+  await assert.rejects(task.bindSession('late-old'), /过期/)
+  assert.equal(h.current().timeline.participants.background.sessionId, 'replacement')
+})
+
+test('failed background rewind retains its boundary through binding and retries', async () => {
+  const h = coordinatorHarness()
+  const seed = await h.coordinator.begin(h.current(), 'settlement')
+  await seed.commit({ participant: seed.participant({ sessionId: 'background', boundary: 19 }) })
+  Object.assign(h.current().timeline.participants.background, { status: 'needs-rewind', rewindTo: -1, boundary: -1 })
+  for (let i = 0; i < 2; i++) {
+    const task = await h.coordinator.begin(h.current(), 'settlement')
+    assert.equal(task.participantRequest.rewindTo, -1)
+    await task.bindSession('background')
+    await task.fail({ sessionId: 'background', boundary: 19 })
+    assert.equal(h.current().timeline.participants.background.status, 'needs-rewind')
+  }
+  const task = await h.coordinator.begin(h.current(), 'settlement')
+  assert.equal(task.participantRequest.rewindTo, -1)
+  await task.commit({ participant: task.participant({ sessionId: 'background', boundary: 25 }) })
+  assert.equal(h.current().timeline.participants.background.status, 'current')
+  assert.equal(h.current().timeline.participants.background.rewindTo, null)
+})

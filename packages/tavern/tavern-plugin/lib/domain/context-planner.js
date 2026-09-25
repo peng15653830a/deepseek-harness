@@ -1,3 +1,4 @@
+import { postureForContext } from './posture-context.js'
 import { projectAgentContent } from './runtime-content-projection.js'
 
 function str(value) {
@@ -33,7 +34,7 @@ export function createContextPlanner(options = {}) {
     const guides = Array.isArray(input.chat.guides) ? input.chat.guides.filter(function (item) { return item !== null && typeof item === 'object' && str(item.text).trim() !== '' }) : []
     const projectedGuides = guides.map(function (item) { return projectText(str(item.text).trim()) }).filter(Boolean)
     const guideSection = input.includeGuides === false || projectedGuides.length === 0 ? null : { kind: 'guide', required: true, text: '【用户指导 Guide · 优先遵循】\n' + projectedGuides.map(function (text, index) { return (index + 1) + '. ' + text }).join('\n') }
-    const projectedPosture = projectText(input.chat.posture)
+    const projectedPosture = input.includePosture === false ? '' : projectText(postureForContext(input.chat))
     const postureSection = input.includePosture === false || projectedPosture === '' ? null : { kind: 'posture', required: true, text: '【现场 · 主要人物状态（每轮结算更新，务必与之一致）】\n' + projectedPosture }
     const cardInfoSections = []
     const instructionSections = []
@@ -134,6 +135,7 @@ export function createContextPlanner(options = {}) {
       const taskSection = { kind: 'candidate-task', required: true, text: str(input.task) }
       const stableSections = []
       const dynamicSections = []
+      let candidateScriptWindow
       const plannedCardSections = cardSections({
         card: input.card,
         chat: input.chat,
@@ -157,6 +159,10 @@ export function createContextPlanner(options = {}) {
             ? '剧本已到结尾。按最近剧情自然收束，或给出一个新场景开头候选。'
             : window.chunks.map(function (chunk) { return '[' + chunk.id + ']\n' + projectText(chunk.text) }).join('\n\n'))
         })
+        if (!window.ended && window.chunks.length) {
+          const text = dynamicSections.at(-1).text
+          candidateScriptWindow = { text, heading: text.split('\n')[0], positions: window.chunks.map((_, index) => window.cursor + index + 1) }
+        }
       }
       const systemPromptText = projectText(input.card.system_prompt)
       const postHistoryText = projectText(input.card.post_history_instructions)
@@ -166,6 +172,7 @@ export function createContextPlanner(options = {}) {
       ]
       const result = resultOf([taskSection].concat(stableSections, instructionSections, dynamicSections), warnings)
       result.stableText = stableSections.map(function (section) { return str(section.text) }).filter(Boolean).join('\n\n')
+      result.candidateScriptWindow = candidateScriptWindow
       result.dynamicText = dynamicSections.map(function (section) { return str(section.text) }).filter(Boolean).join('\n\n')
       result.taskText = taskSection.text
       result.systemPromptText = systemPromptText

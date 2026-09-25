@@ -1,6 +1,7 @@
+import { sameTemplateValue as same, applyTemplateStateChanges } from '../../../domain/template-state-patch.js'
+import { diffJson } from '../../../domain/json-mutation.js'
 const clone = value => value === undefined ? undefined : structuredClone(value)
 const own = (value,key) => Object.prototype.hasOwnProperty.call(value,key)
-const same = (a,b) => JSON.stringify(a) === JSON.stringify(b)
 const record = value => value !== null && typeof value === 'object'
 
 /** Reconcile receipts without discarding edits made while a save was in flight. */
@@ -19,11 +20,40 @@ export function reconcileTemplateReceipt(current, submitted, saved) {
   if(unchangedArray) current.length=saved.length
 }
 
+function applyFields(previous, patch) {
+  const next = {...previous, ...patch.set}
+  for (const key of patch.remove) delete next[key]
+  return next
+}
+export function applyTemplateSync(previous, result) {
+  if (!result.delta) return result
+  if (!previous?.cursor || result.baseCursor !== previous.cursor) throw new Error('Template sync cursor mismatch')
+  const chat = previous.state.chat.slice(0, result.delta.chat.length)
+  for (const [index, row] of result.delta.chat.set) chat[index] = row
+  return { cursor: result.cursor, state: {...applyFields(previous.state, result.delta.state), chat},
+    environment: applyFields(previous.environment, result.delta.environment) }
+}
+
+// Upstream may mutate its context. Reconcile from the transport snapshot without
+// cloning unchanged historical rows or letting local writes corrupt the cursor.
+function restoreSnapshot(target, source, changedRow) {
+  for (const key of Object.keys(target)) if (!own(source,key)) delete target[key]
+  for (const [key,value] of Object.entries(source)) {
+    if (Array.isArray(target[key]) && Array.isArray(value)) {
+      value.forEach((row,index) => { if (!same(target[key][index],row)) {target[key][index]=clone(row);if(key==='chat')changedRow(index)} })
+      target[key].length=value.length
+    } else if (!same(target[key],value)) target[key]=clone(value)
+  }
+}
+
 export async function createNativeTemplateConnection({ sessionId, rpc, services = {}, settingsHtml }) {
-  const initial=await rpc('getFullPromptTemplateState',{sessionId})
-  let baseline=clone(initial.state), settingsBaseline=clone(initial.environment.extension_settings.EjsTemplate)
+  let initial=await rpc('getFullPromptTemplateState',{sessionId})
+  const supportsPatches=initial.capabilities?.statePatch === 1
+  let pendingRows=null
+  const changedRow=index=>pendingRows?.add(index)
+  let baseline=initial.state, settingsBaseline=clone(initial.environment.extension_settings.EjsTemplate)
   let globalBaseline=clone(initial.environment.extension_settings.variables?.global)
-  const snapshot={...initial.state,...initial.environment}
+  const snapshot=clone({...initial.state,...initial.environment})
   let saves=Promise.resolve(), latest=saves
   function enqueue(operation) { const next=saves.then(operation); latest=next; saves=next.catch(error=>{ if(services.onPersistenceError) services.onPersistenceError(error); else console.error('Template persistence failed',error) }); return next }
   async function saveGlobals(settings) {
@@ -42,12 +72,16 @@ export async function createNativeTemplateConnection({ sessionId, rpc, services 
     loadWorldInfo:async name=>clone(initial.environment.worldbooks[name] || null),
     saveChatConditional: data=>enqueue(async()=>{
       await saveGlobals(data.extension_settings)
-      const submitted={...clone(baseline),chat:clone(data.chat),chat_metadata:clone(data.chat_metadata)}
-      const result=await rpc('saveFullPromptTemplateState',{sessionId,state:submitted})
-      if(result.updated!==true || !result.state) throw new Error('Template state save was not acknowledged')
-      reconcileTemplateReceipt(data.chat,submitted.chat,result.state.chat)
-      reconcileTemplateReceipt(data.chat_metadata,submitted.chat_metadata,result.state.chat_metadata)
-      baseline=clone(result.state)
+      if (same(data.chat,baseline.chat) && same(data.chat_metadata,baseline.chat_metadata)) return { updated:false }
+      const changes=diffJson({chat:baseline.chat,chat_metadata:baseline.chat_metadata},{chat:data.chat,chat_metadata:data.chat_metadata})
+      const submitted=applyTemplateStateChanges(baseline,changes)
+      const {chat:_chat,chat_metadata:_metadata,...header}=baseline
+      const result=await rpc('saveFullPromptTemplateState',{sessionId,state:supportsPatches?{...header,changes}:submitted})
+      if(result.updated!==true || (!result.state && !Array.isArray(result.statePatch))) throw new Error('Template state save was not acknowledged')
+      const saved=result.state || applyTemplateStateChanges(submitted,result.statePatch)
+      reconcileTemplateReceipt(data.chat,submitted.chat,saved.chat)
+      reconcileTemplateReceipt(data.chat_metadata,submitted.chat_metadata,saved.chat_metadata)
+      baseline=saved
       return result
     }),
     saveSettingsDebounced:settings=>enqueue(async()=>{
@@ -60,5 +94,21 @@ export async function createNativeTemplateConnection({ sessionId, rpc, services 
       return result
     })
   }
-  return {snapshot,callbacks,flush:()=>latest}
+  return {snapshot,callbacks,flush:()=>latest,displayChanges:()=>pendingRows,acknowledgeDisplay:()=>{pendingRows=new Set()},async refresh() {
+    const previousSave = latest
+    // flush still reports the failed operation. A new explicit refresh must
+    // drain the queue and reload authoritative state instead of replaying that
+    // same rejection forever. Never retry the template's side effects.
+    await saves
+    const response=await rpc('getFullPromptTemplateState',{sessionId,cursor:initial.cursor})
+    if (!response.delta) pendingRows=null
+    else for(const [index] of response.delta.chat.set) changedRow(index)
+    initial=applyTemplateSync(initial,response)
+    baseline=initial.state
+    settingsBaseline=clone(initial.environment.extension_settings.EjsTemplate)
+    globalBaseline=clone(initial.environment.extension_settings.variables?.global)
+    restoreSnapshot(snapshot,{...initial.state,...initial.environment},changedRow)
+    if (latest === previousSave) latest = saves
+    return snapshot
+  }}
 }

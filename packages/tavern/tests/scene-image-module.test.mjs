@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm, cp, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { createImageGenerationModule, IMAGE_MODULE_CONFIGURATION } from '../image-gen/src/module.js'
+import { createImageGenerationModule, IMAGE_MODULE_CONFIGURATION } from '../tavern-plugin/packages/dsh-image-gen/src/module.js'
 import { createSceneImageHostLogger } from '../tavern-plugin/lib/domain/scene-image-diagnostics.js'
 import { createProfileDataStore } from '../tavern-plugin/lib/profile-data-store.js'
 import { legacyImageConfigurationReader } from '../tavern-plugin/lib/domain/image-generation-host.js'
@@ -16,7 +16,7 @@ test('clean runtime imports module without node_modules, Cordis or plugin regist
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(join(root, 'src'))
   await writeFile(join(root, 'package.json'), '{"type":"module"}')
-  const source = new URL('../image-gen/src/', import.meta.url)
+  const source = new URL('../tavern-plugin/packages/dsh-image-gen/src/', import.meta.url)
   for (const file of ['module.js', 'configuration.js', 'tavern']) await cp(new URL(file, source), join(root, 'src', file), { recursive: true })
   const { createImageGenerationModule: create } = await import(pathToFileURL(join(root, 'src/module.js')))
   const module = create({ store: { readJson: async () => undefined }, credentials: () => ({ resolve: async () => undefined }) })

@@ -204,3 +204,11 @@ test('浏览器执行器暂时缺席时立即挂起，并在恢复后复用已�
   assert.equal(modelRuns, 1, '恢复运行时不得重新调用模型生成同一批 operations')
   assert.equal(executions, 2)
 })
+
+test('执行前必须确认提交已持久化，写盘失败时不派发脚本', async () => {
+  let executions = 0
+  const module = createMvuSettlementModule({ runtime: { async settleMvuUpdate() { executions++; return { deferred: true } } },
+    model: { async run(request) { await submitPosture(request); await request.onToolCall(call(patch)); return {} } } })
+  await module.settleVariables({ ...input, onSubmission: async () => { throw new Error('disk unavailable') } })
+  assert.equal(executions, 0)
+})

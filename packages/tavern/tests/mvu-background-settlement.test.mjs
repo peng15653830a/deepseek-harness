@@ -69,7 +69,7 @@ test('深模块强制一次工具调用并以官方 Runtime 的实际差异生�
   assert.deepEqual(result.receipt.changes, [{ operation: 'set', path: '/stat_data/体力', before: '10', after: '9' }])
 })
 
-test('MVU 后台 Agent 在同一回合加载人物设计工具后继续完成姿势和变量结算', async function () {
+test('MVU 后台拒绝人物设计调用，仅完成姿势和变量结算', async function () {
   const designCalls = []
   const module = createMvuSettlementModule({
     characterDesign: {
@@ -79,9 +79,9 @@ test('MVU 后台 Agent 在同一回合加载人物设计工具后继续完成姿
       }
     },
     model: { async run(input) {
-      assert.deepEqual(input.tools.map(tool => tool.name), ['posture_submit', 'character_design_read', 'character_design_save', 'mvu_submit_update'])
+      assert.deepEqual(input.tools.map(tool => tool.name), ['posture_submit', 'mvu_submit_update'])
       await input.onToolCall({ name: 'character_design_read', arguments: {} })
-      await input.onToolCall({ name: 'character_design_save', arguments: completeDesignFixture() })
+      assert.equal(JSON.parse(await input.onToolCall({ name: 'character_design_save', arguments: completeDesignFixture() })).ok, false)
       await input.onToolCall({ name: 'posture_submit', arguments: { posture: '站在门边' } })
       await input.onToolCall({ name: 'mvu_submit_update', arguments: { operations: [] } })
       return { text: '' }
@@ -93,10 +93,7 @@ test('MVU 后台 Agent 在同一回合加载人物设计工具后继续完成姿
     operationId: 'operation-design', chatId: 'chat-design', branchId: 'branch-1', basedOnRevision: 1,
     sessionId: 'session-1', messageId: 0, swipeId: 0, storyText: '她走进门内。', currentVariables: { hp: 10 }
   })
-  assert.deepEqual(designCalls, [
-    { chatId: 'chat-design', name: 'character_design_read' },
-    { chatId: 'chat-design', name: 'character_design_save' }
-  ])
+  assert.deepEqual(designCalls, [])
   assert.equal(result.posture, '站在门边')
   assert.equal(result.receipt.status, 'unchanged')
 })
@@ -404,4 +401,22 @@ test('工具使用约定由工具定义承载，本轮提示只安排任务', ()
       assert.match(request.tools.find(tool => tool.name === 'posture_submit').description, /ok=true 后不再重复提交/)
     }
   }
+})
+
+test('本轮 Helper 建角要求交给结算，后续回合不重放初始化', async () => {
+  const { collectMvuHelperContext } = await import('../tavern-plugin/lib/domain/mvu-background-settlement.js')
+  const setup = '已写入属性；第一轮补齐主角生命值、法力值、体力值。'
+  const messages = [{ role: 'assistant', text: '选择开局' }, { role: 'tavern-helper', text: setup }, { role: 'user', text: '开始' }, { role: 'assistant', text: '你来到旅店。' }]
+  const context = collectMvuHelperContext(messages, 3)
+  assert.deepEqual(context, [setup])
+  const request = projectMvuBackgroundRequest(createMvuBackgroundTaskFrame({ operationId: 'setup-1', chatId: 'chat-setup', branchId: 'main', basedOnRevision: 1, messageId: 3, swipeId: 0, helperContext: context, storyText: messages[3].text }))
+  assert.match(request.turnContext, /第一轮补齐主角生命值/)
+  assert.match(request.turnContext, /初始化/)
+  messages.push({ role: 'user', text: '受伤后休息' }, { role: 'assistant', text: '伤口仍在流血。' })
+  assert.deepEqual(collectMvuHelperContext(messages, 5), [])
+  assert.deepEqual(collectMvuHelperContext(messages, 3), [setup], '重试旧轮仍取旧轮上下文')
+  const next = projectMvuBackgroundRequest(createMvuBackgroundTaskFrame({ operationId: 'setup-1', chatId: 'chat-setup', branchId: 'main', basedOnRevision: 1, messageId: 5, swipeId: 0, helperContext: [], storyText: messages[5].text }))
+  assert.doesNotMatch(next.turnContext, /第一轮补齐/)
+  assert.equal(next.system, request.system, '稳定 system 前缀不随建角上下文变化')
+  assert.deepEqual(collectMvuHelperContext([{role:'user',text:setup},{role:'assistant',text:'正文'}],1),[])
 })

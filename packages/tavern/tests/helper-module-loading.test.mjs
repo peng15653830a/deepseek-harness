@@ -11,7 +11,7 @@ const client = descriptor.factory(() => ({}))
 
 function loader(scripts) {
   const html = client.buildTavernHelperScriptDocument({ token: 'test', scripts, context: {} })
-  const encoded = html.match(/<script type="module" src="data:text\/javascript;base64,([^"]+)"/)[1]
+  const encoded = html.match(/data:text\/javascript;base64,([^"]+)"/)[1]
   return Buffer.from(encoded, 'base64').toString()
 }
 

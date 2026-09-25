@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { redactDiagnostic } from './mvu-diagnostics.js'
 
 function str(value) {
@@ -9,7 +10,8 @@ function clone(value) {
 }
 
 export const TAVERN_SCRIPT_EXECUTION_TIMEOUT_MS = 60000
-export const TAVERN_SCRIPT_CLAIM_TIMEOUT_MS = 5000
+// Allow a 10s fallback heartbeat plus a 15s client request deadline.
+export const TAVERN_SCRIPT_CLAIM_TIMEOUT_MS = 30000
 
 /**
  * Own the lifecycle of Host work that must execute in the browser Tavern
@@ -21,12 +23,36 @@ export function createTavernScriptDispatch(options = {}) {
   const claimTimeoutMs = Math.max(100, Number(options.claimTimeoutMs) || TAVERN_SCRIPT_CLAIM_TIMEOUT_MS)
   const presenceTtlMs = Math.max(executionTimeoutMs, Number(options.presenceTtlMs) || 120000)
   const publishSignal = typeof options.publishSignal === 'function' ? options.publishSignal : function () {}
+  const renewableExecution = options.renewableExecution !== false
   const records = new Map()
   const presence = new Map()
+  // Execution receipts contain identities only; durable MVU effects remain in delivery.
+  const receipts = new Map()
+  function receiptKey(id, event, token, owner) { return JSON.stringify([id, event, token, owner]) }
+  function renew(id, record) {
+    if (record.executionTimer !== null) clearTimeout(record.executionTimer)
+    record.executionTimer = setTimeout(function () {
+      if (renewableExecution && records.get(id) === record) presence.delete(id)
+      resolveRecord(id, record, { handled: false, ...(renewableExecution ? { unavailable: true, executionLost: true } : { timedOut: true }), phase: 'executing', args: clone(record.event.args) })
+    }, executionTimeoutMs)
+  }
+  function workState(sessionId, eventId, leaseToken, runtimeId, keepAlive = false) {
+    const id = str(sessionId)
+    if (receipts.has(receiptKey(id, str(eventId), str(leaseToken), str(runtimeId)))) return { phase: 'completed' }
+    const record = records.get(id)
+    if (!available(id, runtimeId) || !record || record.event.id !== str(eventId)
+      || record.leaseToken !== str(leaseToken) || record.offeredTo !== str(runtimeId)) return { phase: 'unknown' }
+    if (renewableExecution && keepAlive === true && record.phase === 'executing') {
+      presence.get(id).seenAt = now()
+      renew(id, record)
+    }
+    return { phase: record.phase }
+  }
   const readyListeners = new Set()
   const settledListeners = new Set()
   let sequence = 0
   let leaseSequence = 0
+  const incarnation = randomUUID()
 
   function publishReady(sessionId) {
     for (const listener of readyListeners) {
@@ -37,6 +63,7 @@ export function createTavernScriptDispatch(options = {}) {
   function resolveRecord(id, record, result) {
     if (records.get(id) !== record) return false
     records.delete(id)
+    record.stopAbort?.()
     if (record.claimTimer !== null) clearTimeout(record.claimTimer)
     if (record.offerTimer !== null) clearTimeout(record.offerTimer)
     if (record.executionTimer !== null) clearTimeout(record.executionTimer)
@@ -83,7 +110,7 @@ export function createTavernScriptDispatch(options = {}) {
     if (record.phase === 'queued') {
       record.phase = 'offered'
       record.offeredTo = str(runtimeId)
-      record.leaseToken = record.event.id + ':lease-' + (++leaseSequence)
+      record.leaseToken = record.event.id + ':lease-' + incarnation + ':' + (++leaseSequence)
       if (record.claimTimer !== null) clearTimeout(record.claimTimer)
       record.claimTimer = null
       record.offerTimer = setTimeout(function () {
@@ -93,7 +120,7 @@ export function createTavernScriptDispatch(options = {}) {
         record.leaseToken = ''
         record.offerTimer = null
         record.claimTimer = setTimeout(function () {
-          if (records.get(id) === record && record.phase === 'queued') presence.delete(id)
+          if (options.preservePresenceOnClaimTimeout !== true && records.get(id) === record && record.phase === 'queued') presence.delete(id)
           resolveRecord(id, record, { handled: false, unavailable: true, claimTimedOut: true, phase: 'queued', args: clone(record.event.args) })
         }, claimTimeoutMs)
         publishSignal(id, { kind: 'runtime-work', version: record.event.id })
@@ -112,14 +139,14 @@ export function createTavernScriptDispatch(options = {}) {
     record.phase = 'executing'
     if (record.offerTimer !== null) clearTimeout(record.offerTimer)
     record.offerTimer = null
-    record.executionTimer = setTimeout(function () {
-      resolveRecord(id, record, { handled: false, timedOut: true, phase: 'executing', args: clone(record.event.args) })
-    }, executionTimeoutMs)
+    renew(id, record)
     return { started: true, alreadyStarted: false }
   }
 
   function complete(sessionId, eventId, args, runtimeId = 'legacy', leaseToken = '', error = '', diagnostics) {
     const id = str(sessionId)
+    const key = receiptKey(id, str(eventId), str(leaseToken), str(runtimeId))
+    if (receipts.has(key)) return true
     if (!available(id, runtimeId)) return false
     const record = records.get(id)
     if (!record || record.phase !== 'executing' || record.event.id !== str(eventId)
@@ -127,6 +154,8 @@ export function createTavernScriptDispatch(options = {}) {
     const extra = Array.isArray(diagnostics) ? { diagnostics: clone(diagnostics.slice(-50)) } : {}
     const initializationFailed = extra.diagnostics?.some(item => item.kind === 'initialization' && item.initializationFailed)
     const message = initializationFailed ? redactDiagnostic(str(error).slice(0, 4000)).trim() : str(error).trim()
+    receipts.set(key, true)
+    while (receipts.size > 1024) receipts.delete(receipts.keys().next().value)
     return resolveRecord(id, record, message === ''
       ? { handled: true, args: clone(Array.isArray(args) ? args : record.event.args), ...extra }
       : { handled: false, error: message, args: clone(Array.isArray(args) ? args : record.event.args), ...extra,
@@ -135,6 +164,7 @@ export function createTavernScriptDispatch(options = {}) {
 
   async function dispatch(sessionId, name, args = [], context = null, work = {}) {
     const id = str(sessionId)
+    if (work.signal?.aborted) return { handled: false, disposed: true, args: clone(args) }
     const state = status(id)
     if (state.initializationError) return { handled: false, initializationFailed: true, error: state.initializationError, args: clone(args) }
     if (id === '' || !available(id, '', true)) return { handled: false, unavailable: true, args: clone(args) }
@@ -152,10 +182,16 @@ export function createTavernScriptDispatch(options = {}) {
         // longer a usable lease. Keeping that stale presence makes settlement
         // immediately redispatch forever. Its next real claim/heartbeat will
         // register a fresh ready transition and resume the deferred work once.
-        if (records.get(id) === record && record.phase === 'queued') presence.delete(id)
+        if (options.preservePresenceOnClaimTimeout !== true && records.get(id) === record && record.phase === 'queued') presence.delete(id)
         resolveRecord(id, record, { handled: false, unavailable: true, claimTimedOut: true, phase: 'queued', args: clone(event.args) })
       }, claimTimeoutMs)
       records.set(id, record)
+      if (work.signal) {
+        const abort = () => resolveRecord(id, record, { handled: false, disposed: true, phase: record.phase, args: clone(event.args) })
+        work.signal.addEventListener('abort', abort, { once: true })
+        record.stopAbort = () => work.signal.removeEventListener('abort', abort)
+        if (work.signal.aborted) { abort(); return }
+      }
       publishSignal(id, { kind: 'runtime-work', version: event.id })
     })
   }
@@ -189,5 +225,5 @@ export function createTavernScriptDispatch(options = {}) {
       ...(present && current.initializationError ? { initializationError: current.initializationError } : {}) }
   }
 
-  return Object.freeze({ touch, available, claim, start, complete, dispatch, subscribeReady, subscribeSettled, dispose, status })
+  return Object.freeze({ touch, available, claim, start, workState, complete, dispatch, subscribeReady, subscribeSettled, dispose, status })
 }

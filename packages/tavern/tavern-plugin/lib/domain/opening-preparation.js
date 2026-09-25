@@ -1,3 +1,5 @@
+import { worldbookContentDigest } from './worldbook-version.js'
+import { projectFullPromptTemplateState, applyFullPromptTemplateState } from './full-prompt-template-state.js'
 import { projectTavernHelperScripts } from './tavern-helper-scripts.js'
 import { mutateScriptPrompts } from './tavern-script-prompts.js'
 import { projectTavernHelperContext, replaceTavernHelperVariables, replaceTavernHelperMessages } from './tavern-helper-context.js'
@@ -10,7 +12,7 @@ import { projectTavernHelperWorldbook, replaceTavernHelperWorldbookOperations } 
 const copy = value => structuredClone(value)
 
 /** Private pre-game host state. No Session or shared resource is written here. */
-export function createOpeningPreparation({ readCard, worldBooks, templateRuntime, generateRaw, readRuntimeExtensions, now = Date.now }) {
+export function createOpeningPreparation({ readCard, worldBooks, generateRaw, readRuntimeExtensions, now = Date.now }) {
   const drafts = new Map()
   const lifetime = 2 * 60 * 60 * 1000
   function requireDraft(id) {
@@ -38,11 +40,13 @@ export function createOpeningPreparation({ readCard, worldBooks, templateRuntime
     async create(cardPath, settings = {}) {
       for (const [id, draft] of drafts) if (now() - draft.touchedAt > lifetime) drafts.delete(id)
       if (drafts.size >= 64) throw new Error('打开的游戏准备页过多，请稍后重试')
-      const card = await readCard(cardPath)
+      const card = settings.card || await readCard(cardPath)
       if (!card) throw new Error('人物卡不存在')
       const record = await worldBooks.bound(cardPath, card, settings.sourceChat)
       const draft = { id: randomUUID(), cardPath, openings: cardOpeningChoices(card),
         document: record ? copy(record.view.raw) : null, source: record ? copy(record.source) : null, touchedAt: now() }
+      draft.libraryDigest = settings.sourceChat?.worldbookLibraryDigest ?? settings.sourceChat?.openingWorldbookSnapshot?.libraryDigest
+        ?? (settings.sourceChat?.openingWorldbookSnapshot ? undefined : worldbookContentDigest(record))
       draft.sourceSessionId = settings.sourceChat?.sessionId || ''
       draft.sourceLifecycleRevision = Number(settings.sourceChat?.tavernHelperLifecycleRevision) || 0
       draft.card = copy(card)
@@ -50,24 +54,50 @@ export function createOpeningPreparation({ readCard, worldBooks, templateRuntime
       const swipes = draft.openings.map(opening => opening.text)
       draft.chat = { id: draft.id, cardPath, mode: 'story', mvu: { enabled: settings.runtime === true }, _storageRevision: 0,
         variables: {}, messages: [{ role: 'assistant', text: swipes[0], sourceText: swipes[0], greeting: true, turn: 1, swipeId: 0, swipes, variables: swipes.map(() => ({})) }] }
-      const extensions = readRuntimeExtensions ? await readRuntimeExtensions(cardPath) : {}
+      const extensions = settings.extensions || (readRuntimeExtensions ? await readRuntimeExtensions(cardPath) : {})
       const projected = projectTavernHelperScripts(extensions.helperScripts)
       draft.helperScripts = projected.scripts
       draft.diagnostics = projected.diagnostics.concat(extensions.diagnostics || [])
       draft.runtimeEnabled = projected.scripts.length > 0
       draft.extensionSettings = {}
-      if (settings.runtime === true && templateRuntime) {
-        const runtime = await templateRuntime()
-        const initialized = runtime.initializeVariables(record?.view.entries || [], { charName: card.name, userName: draft.userName })
-        if (initialized.diagnostics.length) throw new Error('开场模板初始变量解析失败：' + initialized.diagnostics.map(item => item.code).join('、'))
-        draft.chat.variables = copy(initialized.initial)
-        draft.extensionSettings.EjsTemplate = { enabled: true }
-        draft.runtimeEnabled = true
-      }
+      if (settings.runtime === true) { draft.extensionSettings.EjsTemplate = { enabled: true }; draft.runtimeEnabled = true }
+      draft.chat.sessionId = 'opening:' + draft.id
       drafts.set(draft.id, draft)
       return present(draft)
     },
+    templateState(id) {
+      const draft = requireDraft(id), world = draft.card.name || 'opening'
+      const card = { ...copy(draft.card), data: { ...copy(draft.card), extensions: { ...draft.card.extensions, world } } }
+      return { state: projectFullPromptTemplateState(draft.chat), environment: { characters: [card], this_chid: 0,
+        name1: draft.userName, name2: draft.card.name, world_names: [world], selected_world_info: [],
+        extension_settings: { ...copy(draft.extensionSettings), variables: { global: copy(draft.globalVariables || {}) } },
+        worldbooks: { [world]: draft.document ? exportSillyTavernWorldBook(draft.document) : { entries: {} } },
+        dsh: { cardPath: draft.cardPath, regexScripts: [], model: '' } } }
+    },
+    saveTemplateState(id, state) {
+      const draft = requireDraft(id)
+      draft.chat = applyFullPromptTemplateState(draft.chat, copy(draft.chat), state)
+      draft.chat._storageRevision++
+      return { updated: true, state: projectFullPromptTemplateState(draft.chat) }
+    },
+    saveTemplateSettings(id, settings) {
+      const draft = requireDraft(id); draft.extensionSettings.EjsTemplate = copy(settings)
+      return { updated: true, settings: copy(settings) }
+    },
+    saveTemplateGlobals(id, variables) {
+      const draft = requireDraft(id); draft.globalVariables = copy(variables)
+      return { updated: true, variables: copy(variables) }
+    },
+    applyTemplateInitial(id, result) {
+      const draft = requireDraft(id)
+      if (result.diagnostics?.length) throw new Error('完整模板初始化失败')
+      draft.chat.variables = copy(result.initial)
+      draft.chat._storageRevision++
+      return present(draft)
+    },
     get(id) { return present(requireDraft(id)) },
+    retain(id) { requireDraft(id); return { retained: true } },
+    release(id) { return { released: drafts.delete(id) } },
     async callRuntime(id, method, args = {}) {
       const draft = requireDraft(id)
       if (method === 'generateTavernHelperRaw') {
@@ -109,8 +139,10 @@ export function createOpeningPreparation({ readCard, worldBooks, templateRuntime
     },
     select(id, openingId) {
       const draft = requireDraft(id)
-      if (!draft.openings.some(opening => opening.id === openingId)) throw new Error('人物卡开场白不存在')
+      const index = draft.openings.findIndex(opening => opening.id === openingId)
+      if (index < 0) throw new Error('人物卡开场白不存在')
       draft.openingId = openingId
+      if (draft.chat.messages[0]) draft.chat.messages[0].swipeId = index
       return { saved: true, openingId }
     },
     async replaceWorldbook(id, entries, expectedEntries) {
@@ -128,8 +160,9 @@ export function createOpeningPreparation({ readCard, worldBooks, templateRuntime
       const draft = requireDraft(id)
       if (draft.cardPath !== cardPath) throw new Error('开局草稿与人物卡不匹配')
       const selected = openingId || 'primary'
-      if (!draft.openings.some(opening => opening.id === selected)) throw new Error('人物卡开场白不存在')
-      return copy({ openingVariables: Object.fromEntries(draft.openings.map((opening, index) => [opening.id, draft.chat.messages[0]?.variables?.[index] || {}])), variables: draft.chat.variables || {}, messageVariables: draft.chat.messages[0]?.variables?.[draft.chat.messages[0]?.swipeId || 0] || {}, openingId: selected, sourceSessionId: draft.sourceSessionId, sourceLifecycleRevision: draft.sourceLifecycleRevision, worldbookSnapshot: { version: 1, source: draft.source, document: draft.document } })
+      const selectedIndex = draft.openings.findIndex(opening => opening.id === selected)
+      if (selectedIndex < 0) throw new Error('人物卡开场白不存在')
+      return copy({ openingVariables: Object.fromEntries(draft.openings.map((opening, index) => [opening.id, draft.chat.messages[0]?.variables?.[index] || {}])), variables: draft.chat.variables || {}, messageVariables: draft.chat.messages[0]?.variables?.[selectedIndex] || {}, openingId: selected, sourceSessionId: draft.sourceSessionId, sourceLifecycleRevision: draft.sourceLifecycleRevision, worldbookSnapshot: { version: 1, libraryDigest: draft.libraryDigest, source: draft.source, document: draft.document } })
     }
   }
 }

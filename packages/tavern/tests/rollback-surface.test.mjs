@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { abortedRegenerationTurns, clearFailedTurnSurface, hasRollbackMessages, locateRollbackSurface, planFailedTurnSurface, planRegenerationSurface, regenerationAttemptTurns } from '../tavern-plugin/lib/domain/rollback-surface.js'
+import { rollbackAvailability, pendingFailedSurfaceTurns, abortedRegenerationTurns, clearFailedTurnSurface, hasRollbackMessages, locateRollbackSurface, planFailedTurnSurface, planRegenerationSurface, regenerationAttemptTurns } from '../tavern-plugin/lib/domain/rollback-surface.js'
 
 function modelSource() {
   return { kind: 'model', provider: 'test', model: 'test-model' }
@@ -31,7 +31,7 @@ test('回退识别正则替换后的可见助手节点，并同时覆盖本轮�
     seq: 9,
     type: 'assistant/message',
     data: { turn: 2, step: 1, message: { role: 'assistant', source: modelSource() } },
-    surfaceOp: { op: 'replace', startSeq: 8, end: 8 },
+    surfaceOp: { op: 'replace', start: 8, end: 8 },
     sourceEventSeqs: [8]
   }
 
@@ -74,7 +74,7 @@ test('重生成失败清理墓碑不冒充最后用户输入，仍可回退原�
     seq: 753,
     type: 'user/message',
     data: { role: 'user', content: [], source: { kind: 'plugin', plugin: 'dsh-tavern-regeneration-abort' } },
-    surfaceOp: { op: 'replace', startSeq: 562, end: 750 },
+    surfaceOp: { op: 'replace', start: 562, end: 750 },
     sourceEventSeqs: [562, 563, 750]
   }
 
@@ -122,7 +122,7 @@ test('连续回退时跳过上一轮回退留下的助手墓碑，继续定位�
     seq: 20,
     type: 'assistant/message',
     data: { turn: 3, step: 1, message: { role: 'assistant', content: [], source: modelSource() } },
-    surfaceOp: { op: 'replace', startSeq: 10, end: 12 },
+    surfaceOp: { op: 'replace', start: 10, end: 12 },
     sourceEventSeqs: [10, 12]
   }
 
@@ -146,7 +146,7 @@ test('失败重生成的模型轮次可从尝试区间和持久清理墓碑重�
     seq: 22,
     type: 'user/message',
     data: { source: { kind: 'plugin', plugin: 'dsh-tavern-regeneration-abort' }, content: [] },
-    surfaceOp: { op: 'replace', startSeq: 20, end: 21 },
+    surfaceOp: { op: 'replace', start: 20, end: 21 },
     sourceEventSeqs: [20, 21]
   }
 
@@ -233,8 +233,103 @@ test('失败的正文回合从模型消息面移除本轮全部残留节点', ()
       source: { kind: 'plugin', plugin: 'dsh-tavern-failed-turn-cleanup' }
     },
     options: {
-      surfaceOp: { op: 'replace', startSeq: 55, end: 56 },
+      surfaceOp: { op: 'replace', start: 55, end: 56 },
       sourceEventSeqs: [55, 56]
     }
   }])
+})
+
+function failedThenRolledBack() {
+  return [
+    { seq: 0, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '保留输入' }] } },
+    { seq: 1, type: 'assistant/message', data: { turn: 171, message: { source: modelSource(), content: [{ type: 'text', text: '保留正文' }] } } },
+    { seq: 2, type: 'turn/start', data: { turn: 207 } },
+    { seq: 3, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '失败输入' }] } },
+    { seq: 4, type: 'turn/end', data: { turn: 207, reason: { kind: 'error' } } },
+    { seq: 5, type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-tavern-failed-turn-cleanup' }, content: [] }, surfaceOp: { op: 'replace', start: 3, end: 3 }, sourceEventSeqs: [3] },
+    { seq: 6, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '新输入' }] } },
+    { seq: 7, type: 'assistant/message', data: { turn: 208, message: { source: modelSource(), content: [{ type: 'text', text: '新正文' }] } } },
+    { seq: 8, type: 'assistant/message', data: { turn: 208, message: { source: modelSource(), content: [] } }, surfaceOp: { op: 'replace', start: 6, end: 7 }, sourceEventSeqs: [6, 7] },
+    { seq: 9, type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-tavern', form: 'snapshot' }, content: [] } }
+  ]
+}
+
+test('失败轮次之后的新正文被回退，仍能发现并清理被空标记挡住的失败轮次', () => {
+  const events = failedThenRolledBack()
+  assert.deepEqual(pendingFailedSurfaceTurns({ events, nodes: [0, 1, 5, 8, 9] }), [207])
+  assert.deepEqual(pendingFailedSurfaceTurns({ events, nodes: [0, 1, 5, 8, 9], suppressed: [207] }), [])
+  assert.deepEqual(pendingFailedSurfaceTurns({ events, nodes: [0, 1, 5, 6, 7] }), [], '有未回退的新正文时不清理更早失败轮次')
+})
+
+test('旧 snapshot 不冒充用户输入，清理失败轮次后仍能定位上一完整正文', () => {
+  const events = failedThenRolledBack()
+  const result = locateRollbackSurface({ events, nodes: [0, 1, 5, 8, 9] })
+  assert.equal(result?.turn, 171)
+  assert.equal(result?.userSeq, 0)
+})
+
+
+test('回退可用性要求聊天与原生轮次配对，允许重生成映射，不接受孤立输入', () => {
+  const chat = { messages: [{ role: 'user' }, { role: 'assistant', turn: 2 }] }
+  const events = [
+    { seq: 0, type: 'user/message', data: { role: 'user' } },
+    { seq: 1, type: 'assistant/message', data: { turn: 2, message: { source: modelSource() } } }
+  ]
+  assert.equal(rollbackAvailability(chat, { events, nodes: [0, 1] }).canRollback, true)
+  assert.equal(rollbackAvailability(chat, { events, nodes: [0] }).canRollback, false)
+  assert.equal(rollbackAvailability(chat, { events, nodes: [] }).canRollback, false)
+  events[1].data.turn = 3
+  assert.equal(rollbackAvailability(chat, { events, nodes: [0, 1] }).canRollback, false)
+  chat.regeneratedDshTurns = { 2: 3 }
+  assert.equal(rollbackAvailability(chat, { events, nodes: [0, 1] }).canRollback, true)
+})
+
+test('压缩摘要不能冒充已经压缩掉的玩家输入', () => {
+  const events = [
+    { seq: 0, type: 'user/message', data: { role: 'user', source: { kind: 'plugin', plugin: 'compact', compactionId: 'c' }, content: [{ type: 'text', text: '旧剧情摘要' }] } },
+    { seq: 1, type: 'assistant/message', data: { turn: 2, message: { source: modelSource() } } }
+  ]
+  assert.equal(locateRollbackSurface({ events, nodes: [0, 1] }), null)
+})
+
+test('失败清理不消费已提交正文或仍在运行的输入', () => {
+  const chat = { messages: [{ role: 'user' }, { role: 'assistant', turn: 2 }] }
+  const events = [
+    { seq: 0, type: 'turn/start', data: { turn: 2 } },
+    { seq: 1, type: 'user/message', data: { role: 'user' } },
+    { seq: 2, type: 'assistant/message', data: { turn: 2, message: { source: modelSource() } } },
+    { seq: 3, type: 'turn/end', data: { turn: 2, reason: { kind: 'error' } } }
+  ]
+  assert.equal(rollbackAvailability(chat, { events, nodes: [1, 2] }).canClearIncompleteReply, false)
+  events.push({ seq: 4, type: 'turn/start', data: { turn: 3 } }, { seq: 5, type: 'user/message', data: { role: 'user' } })
+  assert.equal(rollbackAvailability(chat, { events, nodes: [1, 2, 5] }).canClearIncompleteReply, false)
+})
+
+test('摘要之前的输入不能跨越压缩点配对，摘要之后完整的新轮仍可回退', () => {
+  const events = [
+    { seq: 0, type: 'user/message', data: { role: 'user' } },
+    { seq: 1, type: 'user/message', data: { role: 'user', source: { kind: 'plugin', plugin: 'compact' } } },
+    { seq: 2, type: 'assistant/message', data: { turn: 2, message: { source: modelSource() } } }
+  ]
+  assert.equal(locateRollbackSurface({ events, nodes: [0, 1, 2] }), null)
+  events.push({ seq: 3, type: 'user/message', data: { role: 'user' } }, { seq: 4, type: 'assistant/message', data: { turn: 3, message: { source: modelSource() } } })
+  assert.deepEqual(locateRollbackSurface({ events, nodes: [1, 2, 3, 4] }).shadowedSeqs, [3, 4])
+})
+
+test('失败清理只豁免已退役的历史提示词，不放宽跨正文的安全检查', () => {
+  const frame = { seq: 6, type: 'user/message', data: { content: [], source: { kind: 'plugin', plugin: 'dsh-tavern', form: 'foreground-frame' } }, surfaceOp: { op: 'replace', start: 2, end: 2 } }
+  const events = [
+    { seq: 3, type: 'assistant/message', data: { turn: 1 } },
+    { seq: 5, type: 'turn/start', data: { turn: 2 } }, frame,
+    { seq: 7, type: 'user/message', data: {} },
+    { seq: 8, type: 'turn/end', data: { turn: 2, reason: { kind: 'error' } } }
+  ]
+  assert.equal(planFailedTurnSurface({ events, nodes: [6, 3], turn: 2 }), null)
+  for (const replacement of [
+    { ...frame, data: { ...frame.data, content: [{ type: 'text', text: '仍有效的提示词' }] } },
+    { ...frame, data: { ...frame.data, source: { kind: 'user' } } },
+    { ...frame, surfaceOp: 'append' }
+  ]) {
+    assert.throws(() => planFailedTurnSurface({ events: events.map(event => event === frame ? replacement : event), nodes: [6, 3, 7], turn: 2 }), /不是连续区间/)
+  }
 })

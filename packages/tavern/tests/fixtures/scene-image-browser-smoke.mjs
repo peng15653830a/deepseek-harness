@@ -30,13 +30,13 @@ let bundle = 'const modules={};\n'
 const modules = ['react', 'scheduler', 'react-dom', 'react-dom/client']
 const files = [['react.production.js', 'react.production.min.js'], ['scheduler.production.js', 'scheduler.production.min.js'], ['react-dom.production.js', 'react-dom.production.min.js'], ['react-dom-client.production.js', 'react-dom-client.production.min.js']]
 for (let i = 0; i < modules.length; i++) {
-  if (modules[i] === 'react-dom/client') {
-    bundle += `modules['react-dom/client']={createRoot:modules['react-dom'].createRoot,hydrateRoot:modules['react-dom'].hydrateRoot};\n`
-    continue
-  }
   let source
   for (const file of files[i]) {
     try { source = await readFile(join(dirname(require.resolve(modules[i])), 'cjs', file), 'utf8'); break } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+  if (!source && modules[i] === 'react-dom/client') {
+    bundle += `modules['react-dom/client']={createRoot:modules['react-dom'].createRoot,hydrateRoot:modules['react-dom'].hydrateRoot};\n`
+    continue
   }
   if (!source) throw new Error('Missing production bundle for ' + modules[i])
   bundle += `modules[${JSON.stringify(modules[i])}]=(()=>{const module={exports:{}};const exports=module.exports;const require=name=>modules[name];\n${source}\nreturn module.exports;})();\n`
@@ -44,7 +44,8 @@ for (let i = 0; i < modules.length; i++) {
 const client = await readFile(new URL('../../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
 // The real sidebar populates this session metadata cache; this isolated host has
 // no sidebar. Seed only that metadata, leaving the registered dock/renderers intact.
-const fixtureClient = client.replace('const tavernSessionModes = { values: {},', 'const tavernSessionModes = { values: {"scene-parent":"story"},')
+// This fixture has a fixed story; image actions refresh through their DOM events.
+const fixtureClient = client.replace('const tavernSessionModes = { values: {},', 'const tavernSessionModes = { values: {"scene-parent":"story"},').replace('let tavernSessionSignals;', 'let tavernSessionSignals = { subscribe: () => () => {} };')
 const settingsSource = client.slice(client.indexOf('function SceneImageSettings()'), client.indexOf('function TavernSettingsSection()'))
 const css = await readFile(new URL('../../tavern-plugin/lib/client-assets/tavern.css', import.meta.url), 'utf8')
 const script = `${bundle}
@@ -55,7 +56,7 @@ ${fixtureClient}
 const components={};
 client.createTavernAssistantRendererFeatureModule().register({ctx:{effect:(fn,label)=>label==='dsh-tavern: game script owner'?()=>{}:fn()},slots:{inject:(_name,fn)=>fn(),register:(spec,component)=>{components[spec.key]=component;return ()=>{};}}});
 const dockSlots={};
-client.createPlayControlsFeatureModule().register({ctx:{effect:fn=>fn(),betterSidebar:{registerTab:()=>()=>{}},sessions:{refresh:async()=>{}},remote:{commands:{execute:async()=>({ok:true})}}},slots:{inject:(_name,fn)=>fn(),register:(spec,component)=>{dockSlots[spec.id]=component;return ()=>{};}}});
+client.createPlayControlsFeatureModule().register({ctx:{get:()=>undefined,effect:fn=>fn(),betterSidebar:{registerTab:()=>()=>{}},sessions:{refresh:async()=>{},subagentAddress:()=>null},remote:{commands:{execute:async()=>({ok:true})}}},slots:{inject:(_name,fn)=>fn(),register:(spec,component)=>{dockSlots[spec.id]=component;return ()=>{};}}});
 const root=modules['react-dom/client'].createRoot(document.querySelector('#app'));
 const props={sessionId:'scene-parent',node:{data:{status:'completed',blocks:[],finalNode:{seq:1}},location:{kind:'turn',turn:{turn:1,status:'closed'}}},useTurnData:()=>null,fileMentions:()=>undefined};
 root.render(React.createElement(components['assistant-step'],props));
@@ -92,7 +93,7 @@ const server = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk
     const args = body ? JSON.parse(body) : {}
     let result = {}
-    if (method === 'getSession') result = { view: { mode: 'story', canRollback: true, releaseCapabilities: { sceneImages: true }, card: { name: '测试卡' }, replyProjections: [{ version: 2, turn: 1, parts: [{ kind: 'markdown', text: runtime.chat.messages[0].swipes[runtime.chat.messages[0].swipeId] }] }] } }
+    if (method === 'getSession') result = { view: { mode: 'story', latestAssistantTurn: 1, canRollback: true, releaseCapabilities: { sceneImages: true }, card: { name: '测试卡' }, replyProjections: [{ version: 2, turn: 1, parts: [{ kind: 'markdown', text: runtime.chat.messages[0].swipes[runtime.chat.messages[0].swipeId] }] }] } }
     else if (method === 'getSceneImageSettings') result = { settings: await runtime.service.settings(args?.provider) }
     else if (method === 'saveSceneImageSettings') result = { settings: await runtime.service.configure(args) }
     else if (method === 'sceneImageStatus') result = { illustration: await runtime.service.status('scene-parent', 1) }

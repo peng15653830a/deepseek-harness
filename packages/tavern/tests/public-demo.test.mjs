@@ -6,7 +6,7 @@ import { inspectCardExtensions } from '../tavern-plugin/lib/domain/card-extensio
 import { projectReplyLayers } from '../tavern-plugin/lib/domain/reply-presentation.js'
 
 test('阿芙拉公开演示以展示正则美化开场，同时保持 Session 原文', async () => {
-  const source = await readFile(new URL('../demo/cards/avra-complete.json', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../examples/avra/cards/avra-complete.json', import.meta.url), 'utf8')
   const card = JSON.parse(source)
   const regexScripts = inspectCardExtensions(card).regexScripts
   const opening = card.data.first_mes

@@ -19,7 +19,7 @@ function fixture(t) {
   mkdirSync(path.dirname(bootstrap), { recursive: true })
   writeFileSync(bootstrap, '')
   const packages = {}
-  for (const [name, exportName] of [['dsh-agent', 'agentEvents'], ['dsh-tools', 'defineTool'], ['dsh-subagent', 'snapshotSubagentDescriptor'], ['dsh-typert-protocol', 'TypertRemoteService']]) {
+  for (const [name, exportName] of [['dsh-agent', 'agentEvents'], ['dsh-tools', 'defineTool'], ['dsh-skill-filesystem', 'FileSystemSkillProvider'], ['dsh-subagent', 'snapshotSubagentDescriptor'], ['dsh-typert-protocol', 'TypertRemoteService']]) {
     const directory = path.resolve(path.dirname(bootstrap), '../node_modules/@deepseek-ai', name)
     mkdirSync(directory, { recursive: true })
     writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ name: `@deepseek-ai/${name}`, version: '0.1.2-alpha.1', type: 'module', exports: './index.js' }))
@@ -185,4 +185,18 @@ test('本地包版本不等于宿主或 alpha.2 也不拦截；依赖安装失�
     run() { throw new Error('模拟普通依赖安装失败') },
   }), /模拟普通依赖安装失败/)
   assert.equal(readFileSync(path.join(f.pluginDirectory, 'pnpm-workspace.yaml'), 'utf8'), f.original)
+})
+
+test('旧插件缺少新增 agent 链接时从已有宿主链接找到完整依赖', t => {
+  const f = fixture(t)
+  const anchor = path.join(f.pluginDirectory, 'lib/index.js')
+  const scope = path.join(f.pluginDirectory, 'node_modules/@deepseek-ai')
+  mkdirSync(scope, { recursive: true })
+  for (const [name, directory] of Object.entries(f.packages)) {
+    if (name.endsWith('/dsh-agent')) continue
+    symlinkSync(directory, path.join(scope, name.split('/')[1]), 'junction')
+  }
+  const deps = resolveHostDependencies({ host: 'desktop', env: { DSH_TAVERN_HOST_DEPENDENCY_ANCHOR: anchor } })
+  assert.equal(deps.length, 5)
+  for (const dep of deps) assert.equal(dep.directory, realpathSync(f.packages[dep.name]))
 })

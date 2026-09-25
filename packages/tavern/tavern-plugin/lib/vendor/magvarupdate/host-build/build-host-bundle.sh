@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 vendor_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
-expected_sha=dba455f2b820da01dfa9bdce840fb449d10d2275841c93de29c01c9e8065358e
+expected_sha=f42355f9de8310674e886150ce045752be559ec1290ee75b0f4fa444b39d1100
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/dsh-mvu-host-build.XXXXXX")
 
 cleanup() {

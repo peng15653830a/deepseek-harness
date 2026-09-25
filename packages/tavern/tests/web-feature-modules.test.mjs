@@ -62,7 +62,7 @@ test('资源变化只刷新相关资料库，并忽略来源资料库自己的�
   assert.equal(affects({}, ['cards'], 'cards'), true)
 })
 
-test('剧本库 Feature module 只向宿主暴露注册 interface', function () {
+test('剧本与素材库 Feature module 只向宿主暴露注册 interface', function () {
   const feature = browser.createResourcesLibraryFeatureModule()
   let registration
   const effects = []
@@ -78,7 +78,7 @@ test('剧本库 Feature module 只向宿主暴露注册 interface', function () 
 
   assert.deepEqual(Object.keys(feature), ['register'])
   assert.equal(registration.id, 'dsh-tavern:resources')
-  assert.equal(registration.title, '剧本库')
+  assert.equal(registration.title, '剧本与素材库')
   assert.equal(typeof registration.component, 'function')
   assert.deepEqual(effects, ['dsh-tavern: Better Sidebar resources tab'])
 })
@@ -105,7 +105,7 @@ test('预设库明确建议内置预设，并说明改卡、Guide 与外部预�
     useState: value => [typeof value === 'function' ? value() : value, () => {}],
     useRef: value => ({ current: value }),
     useCallback: callback => callback,
-    useEffect() {},
+    useEffect() {}, useLayoutEffect() {},
     createElement: (type, props, ...children) => typeof type === 'function' ? type(props) : { type, props, children }
   }
   const exports = await clientExports(react)
@@ -173,9 +173,10 @@ test('游玩控制 Feature module 统一注册状态栏与对话控制面板', f
   feature.register({ ctx, slots })
 
   assert.deepEqual(Object.keys(feature), ['register'])
-  assert.equal(tabs[0].id, 'dsh-tavern:status')
+  assert.deepEqual(tabs.map(tab => tab.id), ['dsh-tavern:conversation-settings', 'dsh-tavern:status'])
   assert.deepEqual(injectedSlots, [
-    'conversation.session.header.actions',
+    'conversation.session.header.utilities',
+    'conversation.session.header.utilities',
     'conversation.session.header.utilities',
     'conversation.input.dock',
     'conversation.input.dock',
@@ -213,7 +214,7 @@ test('酒馆 Shell Feature module 封装工作区入口并只暴露注册 interf
 test('品牌首页只匹配没有会话的 hero，空白任务和已有对话保留输入框', async () => {
   const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
   const css = await readFile(new URL('../tavern-plugin/lib/client-assets/tavern.css', import.meta.url), 'utf8')
-  const selector = 'body.dsh-tavern-shell-active [data-phase="hero"]:has([data-composer-seat]):not(:has(> [data-slot="conversation.session.header"]))'
+  const selector = 'body.dsh-tavern-shell-active .dsh-tavern-landing'
   assert.ok(css.includes(selector + ' > * { display: none !important; }'))
   assert.ok(css.includes(selector + '::before { content: "🍺 DSH Tavern";'))
   assert.doesNotMatch(source, /mountTavernHomePlaceholder|dsh-tavern: home placeholder/)
@@ -237,7 +238,7 @@ test('游玩历史菜单不重复提供分叉入口', async () => {
 test('首页选择器行只在 Tavern hero 隐藏，不更改宿主预设和工作区逻辑', async () => {
   const source = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
   const css = await readFile(new URL('../tavern-plugin/lib/client-assets/tavern.css', import.meta.url), 'utf8')
-  assert.ok(css.includes('body.dsh-tavern-shell-active [data-phase="hero"] div:has(> [data-slot="conversation.hero.agentPreset"]) { display: none !important; }'))
+  assert.ok(css.includes('body.dsh-tavern-shell-active .dsh-tavern-hero-preset-row { display: none !important; }'))
   assert.match(source, /const agentPreset = "tavern"/)
   assert.match(source, /props\.workspaces\.create\(\{ path: resourceRoot\.path \}\)/)
 })
@@ -250,4 +251,36 @@ test('世界书搜索匹配正文和触发词，过滤后保留原编辑索引',
   assert.deepEqual(Array.from(keyword.dynamic, x => x.index), [2])
   assert.equal(browser.groupWorldBookEditorEntries(entries, '不存在').constant.length, 0)
   assert.equal(entries.length, 3)
+})
+
+test('预设界面按保存的段内顺序展示，并用源位置区分重复标识', () => {
+  const groups = browser.groupPresetEntriesByPhase({ entries: [
+    { entryKey: 'same#1', sourcePromptIndex: 0 }, { entryKey: 'same#2', sourcePromptIndex: 1 }
+  ], dshPreset: { front: [
+    { id: 'same#2', source: { sourcePromptIndex: 1 } }, { id: 'same#1', source: { sourcePromptIndex: 0 } }
+  ] } })
+  assert.deepEqual(Array.from(groups.front, entry => entry.entryKey), ['same#2', 'same#1'])
+})
+
+test('游玩控制不注册或覆盖原生子代理目录，也不显示后台身份栏', () => {
+  const lineage = 'conversation.session.header.lineage'
+  const nativeEntry = { name: lineage, id: 'native-subagent', priority: 0 }
+  const entries = [nativeEntry]
+  const slots = {
+    inject(_name, activate) { return activate() },
+    register(options) {
+      if (options.name === lineage && entries.some(entry => entry.name === lineage && (entry.priority ?? 0) === (options.priority ?? 0))) {
+        throw new Error('single slot "' + lineage + '" already has a registration at priority ' + (options.priority ?? 0))
+      }
+      entries.push(options)
+      return () => entries.splice(entries.indexOf(options), 1)
+    }
+  }
+  browser.createPlayControlsFeatureModule().register({ slots, ctx: {
+    sessions: {}, get() { return {} }, effect(activate) { return activate() },
+    betterSidebar: { registerTab() { return () => {} } }
+  } })
+  assert.deepEqual(entries.filter(entry => entry.name === lineage), [nativeEntry], '即使换 priority，也不能抢占原生子代理目录')
+  const identity = entries.find(entry => entry.id === 'dsh-tavern-background-identity')
+  assert.equal(identity, undefined)
 })

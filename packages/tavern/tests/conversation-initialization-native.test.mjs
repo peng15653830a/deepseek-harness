@@ -4,6 +4,33 @@ import test from 'node:test'
 import { createInitializationNative } from './fixtures/conversation-initialization-native.mjs'
 
 const native = { skip: !process.env.DSH_BOOT_MODULE, timeout: 30000 }
+test('V3 opening reserves the native system head before story seeds', native, async t => {
+  const h = await createInitializationNative(process.env.DSH_BOOT_MODULE)
+  t.after(() => h.dispose())
+  await h.open().start(h.input)
+  if (h.target.session.header.version < 3) return
+  const opening = structuredClone(sessionEvents(h.target.session))
+  assert.equal(opening[0].type, 'system/message')
+  await h.continueWithAgent()
+  const session = h.target.session
+  assert.equal(session.eventAt(session.surface.nodes[0]).type, 'system/message')
+  assert.equal(h.requests[0].messages[0].role, 'system')
+  assert.match(JSON.stringify(h.requests[0].messages[0].content), /不可丢失的固定背景/)
+  assert.deepEqual(sessionEvents(session).slice(0, opening.length), opening)
+})
+for (const phase of ['front', 'back']) test(`native Agent preserves fixed system background with ${phase} preset`, native, async t => {
+  const h = await createInitializationNative(process.env.DSH_BOOT_MODULE, { preset: { [phase]: { entries: [{ role: 'system', content: '预设验证要求' }] } } })
+  t.after(() => h.dispose())
+  await h.open().start(h.input)
+  await h.continueWithAgent()
+  assert.equal(h.requests.length, 1)
+  const request = h.requests[0]
+  const systems = request.system
+  assert.match(systems, /不可丢失的固定背景/)
+  assert.equal(request.messages.filter(m => m.role !== 'system').some(m => JSON.stringify(m.content).includes('不可丢失的固定背景')), false)
+  assert.equal(systems.split('不可丢失的固定背景').length - 1, 1)
+  assert.ok(request.messages.some(m => JSON.stringify(m.content).includes('预设验证要求')))
+})
 const openingEvents = session => sessionEvents(session).filter(e => e.type === 'assistant/message' && e.data.turn === 1)
 
 test('oversized import enters native pressure compaction only after subsequent context growth', native, async t => {
@@ -65,9 +92,12 @@ test('native Session and disk Chat journal recover a failed marker once, then ac
   await h.continueWithAgent()
   assert.equal(h.requests.length, 1)
   const messages = h.requests[0].messages
-  assert.match(h.requests[0].system, /不可丢失的固定背景/)
-  assert.ok(messages.every(message => !JSON.stringify(message.content).includes('不可丢失的固定背景')))
-  assert.equal(h.target.session.requestHeader().system, h.requests[0].system)
+  const nativeSystem = messages.filter(m => m.role === 'system')
+  const systemText = h.requests[0].system ?? nativeSystem.map(m => m.content.map(b => b.text || '').join('')).join('\n')
+  assert.match(systemText, /不可丢失的固定背景/)
+  assert.ok(messages.filter(m => m.role !== 'system').every(message => !JSON.stringify(message.content).includes('不可丢失的固定背景')))
+  if (h.target.session.header.version < 3) assert.equal(h.target.session.requestHeader().system, systemText)
+  else assert.equal(nativeSystem.length, 1)
   assert.equal(messages.filter(m => m.role === 'assistant' && JSON.stringify(m.content).includes('玩家，你好。')).length, 1)
   assert.deepEqual(sessionEvents(h.target.session).filter(e => e.type === 'turn/start').map(e => e.data.turn), [1, 2])
   assert.equal(sessionEvents(h.target.session).at(-1).type, 'turn/end')

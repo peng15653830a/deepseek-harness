@@ -16,8 +16,8 @@ test('one non-JSON card remains visible without hiding healthy cards or modifyin
   const bad = '<开局>\n必看\n私人正文'
   await writeFile(store.absolute('cards/损坏.json'), bad)
   await writeFile(store.absolute('cards/正常.json'), JSON.stringify({ name: '正常人物卡' }))
-  const list = new Function('fileResources', 'readCardWorkspace', 'cardPreparation', 'orderCardsByNewestImport', 'return (' + listing + ')')(
-    store, path => store.readCard(path), { project: value => value }, cards => cards)
+  const list = new Function('fileResources', 'readCardWorkspace', 'cardPreparation', 'orderCardsByNewestImport', 'cardOrganization', 'return (' + listing + ')')(
+    store, path => store.readCard(path), { project: value => value }, cards => cards, { project: async cards => cards })
   const cards = await list()
   assert.equal(cards.length, 2)
   assert.equal(cards.find(c => c.path === 'cards/正常.json').name, '正常人物卡')

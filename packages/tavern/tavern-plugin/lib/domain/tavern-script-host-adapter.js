@@ -1,4 +1,9 @@
-import { projectFullPromptTemplateState, applyFullPromptTemplateState, validateFullPromptTemplateSave } from './full-prompt-template-state.js'
+import { randomUUID } from 'node:crypto'
+import { diffJson } from './json-mutation.js'
+import { createFullPromptTemplateSync } from './full-prompt-template-sync.js'
+import { createJsonValueProjectionCache } from './immutable-json-projection.js'
+import { resourceSaveSummary, observeResourceSave } from './resource-save-summary.js'
+import { projectFullPromptTemplateState, applyFullPromptTemplateState, validateFullPromptTemplateSave, expandFullPromptTemplatePatch } from './full-prompt-template-state.js'
 import { mutateScriptPrompts } from './tavern-script-prompts.js'
 import { exportSillyTavernWorldBook, inspectWorldBookDocument, updateWorldBookDocument } from './worldbook-resource.js'
 import { isDeepStrictEqual } from 'node:util'
@@ -34,6 +39,8 @@ const MVU_RETRY_AFTER_MS = 3100
  * of dsh-tavern's authoritative chat and worldbook state.
  */
 export function createTavernScriptHostAdapter(options = {}) {
+  const syncTemplateState = createFullPromptTemplateSync()
+  const templateCharacters = createJsonValueProjectionCache({ capacity: 8, maxBytes: 16 * 1024 * 1024 })
   const mutationTails = new Map()
   const settlementTransactions = new Map()
 
@@ -70,7 +77,8 @@ export function createTavernScriptHostAdapter(options = {}) {
   }
 
   function assertTransactionEvent(transaction, eventId) {
-    if (transaction !== undefined && transaction.eventId !== str(eventId)) {
+    if ((transaction !== undefined && transaction.eventId !== str(eventId))
+      || (transaction === undefined && str(eventId).startsWith('mvu-work:'))) {
       const error = new Error('脚本写入不属于当前 MVU 结算事件')
       error.code = 'MVU_SETTLEMENT_EVENT_MISMATCH'
       throw error
@@ -83,8 +91,9 @@ export function createTavernScriptHostAdapter(options = {}) {
     return transaction === undefined ? await resolveChat(sessionId) : transaction.draft
   }
 
-  function transactionResult(sessionId, target, multiple = false) {
+  function transactionResult(sessionId, target, multiple = false, eventId = '') {
     const transaction = settlementTransactions.get(str(sessionId))
+    assertTransactionEvent(transaction, eventId)
     if (transaction === undefined) return null
     transaction.mutations++
     return {
@@ -101,14 +110,18 @@ export function createTavernScriptHostAdapter(options = {}) {
       await assertScriptEnabled(chat)
       if (!mutationIsCurrent(chat, expectedLifecycleRevision)) return staleMutation(chat)
       if (!mutateScriptPrompts(chat, operation)) return { updated: false, context: projectTavernHelperContext(chat) }
-      const transactional = transactionResult(sessionId, { type: 'prompts' })
+      const transactional = transactionResult(sessionId, { type: 'prompts' }, false, eventId)
       if (transactional !== null) return transactional
       await options.writeChat(chat, { source: 'tavern-helper.prompts' })
       return { updated: true, context: projectTavernHelperContext(chat) }
     })
   }
 
-  async function updateVariables(sessionId, option, variables, expectedLifecycleRevision, eventId) {
+  async function updateVariables(sessionId, option, variables, expectedLifecycleRevision, eventId, contextBaseline) {
+    return serializeWorldbook('variables:' + sessionId, () => updateVariablesNow(sessionId, option, variables, expectedLifecycleRevision, eventId, contextBaseline))
+  }
+
+  async function updateVariablesNow(sessionId, option, variables, expectedLifecycleRevision, eventId, contextBaseline) {
     const chat = await mutationChat(sessionId, eventId)
     await assertScriptEnabled(chat)
     if (!mutationIsCurrent(chat, expectedLifecycleRevision)) return staleMutation(chat)
@@ -128,16 +141,69 @@ export function createTavernScriptHostAdapter(options = {}) {
       })
       return { updated: true, target: { type: 'character' }, characterVariables: structuredClone(saved) }
     }
+    const canPatch = options.patchChat && Number.isSafeInteger(chat._storageRevision) && chat._storageRevision > 0
+      && !settlementTransactions.has(str(sessionId))
+    // Capture references to replaced values, not copies of the entire history.
+    // Message variable arrays are mutated in place by the compatibility API.
+    const before = canPatch ? {
+      variables: chat.variables,
+      scripts: chat.tavernHelperScriptVariables && { ...chat.tavernHelperScriptVariables },
+      messages: option?.type === 'message' ? (chat.messages || []).map(message =>
+        Array.isArray(message?.variables) ? message.variables.slice() : message?.variables) : []
+    } : null
+    const baseRevision = chat._storageRevision
+    const compact = canPatch && contextBaseline?.chatId === chat.id
+      && contextBaseline.stateRevision === baseRevision
+      && contextBaseline.lifecycleRevision === (chat.tavernHelperLifecycleRevision || 0)
+      && (chat.messages || []).every(message => message && typeof message === 'object')
+    let patched = false
     const updated = replaceTavernHelperVariables(chat, { option, variables })
-    const transactional = transactionResult(sessionId, updated)
+    const transactional = transactionResult(sessionId, updated, false, eventId)
     if (transactional !== null) return transactional
-    try { await options.writeChat(chat, { source: 'tavern-helper.variables' }) }
+    try {
+      let saved
+      if (canPatch) {
+        const path = updated.type === 'message' ? ['messages', updated.messageId, 'variables']
+          : [updated.type === 'chat' ? 'variables' : 'tavernHelperScriptVariables']
+        const previous = updated.type === 'message' ? before.messages[updated.messageId]
+          : updated.type === 'chat' ? before.variables : before.scripts
+        const current = updated.type === 'message' ? chat.messages[updated.messageId].variables
+          : updated.type === 'chat' ? chat.variables : chat.tavernHelperScriptVariables
+        // Match the existing JSON store's normalization (including sparse swipes).
+        const normalized = JSON.parse(JSON.stringify(current))
+        const changes = diffJson(previous, normalized).map(change => ({ ...change, path: [...path, ...change.path] }))
+        saved = await options.patchChat(chat.id, chat._storageRevision, changes, {
+          source: 'tavern-helper.variables',
+          assertCurrent: () => assertTransactionEvent(settlementTransactions.get(str(sessionId)), eventId)
+        })
+        if (saved) {
+          patched = true
+          const { messages: _messages, ...header } = saved
+          Object.assign(chat, header)
+          if (updated.type === 'message') chat.messages[updated.messageId].variables = normalized
+        }
+      }
+      // A competing revision needs the existing three-way merge/conflict checks.
+      if (!saved) await options.writeChat(chat, { source: 'tavern-helper.variables' })
+    }
     catch (error) {
       if (error && error.code === 'DSH_TAVERN_CHAT_CONFLICT') {
         const latest = await options.resolveChat(str(sessionId))
         if (latest !== undefined && !mutationIsCurrent(latest, expectedLifecycleRevision)) return staleMutation(latest)
       }
       throw error
+    }
+    if (compact && patched) {
+      // Project only the affected floor, never the complete history. Keep the
+      // selected swipe semantics of the full compatibility projection.
+      const changes = updated.type === 'message'
+        ? { messageId: updated.messageId, message: { ...projectTavernHelperContext({ messages: [chat.messages[updated.messageId]] }).messages[0], message_id: updated.messageId } }
+        : updated.type === 'chat' ? { chatVariables: structuredClone(chat.variables || {}) }
+          : { scriptVariables: structuredClone(chat.tavernHelperScriptVariables || {}) }
+      return { updated: true, target: updated, contextDelta: {
+        version: 1, chatId: chat.id, lifecycleRevision: chat.tavernHelperLifecycleRevision || 0,
+        baseRevision, stateRevision: chat._storageRevision, ...changes
+      } }
     }
     return { updated: true, target: updated, context: projectTavernHelperContext(chat) }
   }
@@ -164,7 +230,7 @@ export function createTavernScriptHostAdapter(options = {}) {
         chat.mvu.openingInitialization = { version: 2, status: 'complete', completedAt: Date.now() }
       }
     }
-    const transactional = transactionResult(sessionId, updated, true)
+    const transactional = transactionResult(sessionId, updated, true, eventId)
     if (transactional !== null) return transactional
     try { await options.writeChat(chat, { source: 'tavern-helper.messages' }) }
     catch (error) {
@@ -197,9 +263,9 @@ export function createTavernScriptHostAdapter(options = {}) {
     return { updated: true, targets: created, context: projectTavernHelperContext(chat) }
   }
 
-  async function worldbookRecord(sessionId, requestedName) {
+  async function worldbookRecord(sessionId, requestedName, template = false) {
     const chat = await resolveChat(sessionId)
-    await assertScriptEnabled(chat)
+    if (template) assertTemplateChat(chat); else await assertScriptEnabled(chat)
     const card = await options.readCard(chat)
     const record = await options.worldBooks.bound(chat.cardPath, card, chat)
     if (record === null) throw new Error('当前人物卡没有绑定世界书')
@@ -219,15 +285,15 @@ export function createTavernScriptHostAdapter(options = {}) {
     finally { if (mutationTails.get(key) === current) mutationTails.delete(key) }
   }
 
-  async function getWorldbook(sessionId, name) {
-    const resolved = await worldbookRecord(sessionId, name)
+  async function getWorldbook(sessionId, name, template = false) {
+    const resolved = await worldbookRecord(sessionId, name, template)
     return { worldbook: projectTavernHelperWorldbook(resolved.record.view) }
   }
 
-  async function replaceWorldbook(sessionId, name, entries, expectedEntries) {
-    const initial = await worldbookRecord(sessionId, name)
+  async function replaceWorldbook(sessionId, name, entries, expectedEntries, template = false) {
+    const initial = await worldbookRecord(sessionId, name, template)
     return await serializeWorldbook(worldbookKey(initial.record), async function () {
-      const resolved = await worldbookRecord(sessionId, name)
+      const resolved = await worldbookRecord(sessionId, name, template)
       if (worldbookKey(resolved.record) !== worldbookKey(initial.record)) throw new Error('世界书绑定已变化，请重新读取后重试')
       if (expectedEntries !== undefined && JSON.stringify(projectTavernHelperWorldbook(resolved.record.view).entries) !== JSON.stringify(expectedEntries)) {
         throw new Error('世界书已被其他操作修改，请重新读取后重试')
@@ -237,7 +303,7 @@ export function createTavernScriptHostAdapter(options = {}) {
       if (transaction && operations.length > 0) throw new Error('MVU 结算事务不能修改跨存储的世界书')
       const updated = operations.length === 0
         ? resolved.record
-        : await updateBoundWorldbook(resolved, { operations })
+        : await observeResourceSave(resourceSaveSummary('worldbook', resolved.record.localChatId ? 'session' : resolved.record.source.kind === 'card' ? 'card' : 'worldbook', projectTavernHelperWorldbook(resolved.record.view).entries, entries), () => updateBoundWorldbook(resolved, { operations }), summary => options.recordResourceSave?.(sessionId, summary))
       return { updated: operations.length > 0, worldbook: projectTavernHelperWorldbook(updated.view) }
     })
   }
@@ -268,7 +334,7 @@ export function createTavernScriptHostAdapter(options = {}) {
   }
 
   async function exportBoundWorldbook(record) {
-    return record.localChatId ? exportSillyTavernWorldBook(record.document)
+    return record.document ? exportSillyTavernWorldBook(record.document)
       : (await options.worldBooks.export(record.source)).document
   }
 
@@ -292,7 +358,7 @@ export function createTavernScriptHostAdapter(options = {}) {
       if (!isDeepStrictEqual(current, expectedWorldInfo)) throw new Error('世界书已被其他操作修改，请重新读取后重试')
       const transaction = settlementTransactions.get(str(sessionId))
       if (transaction) throw new Error('MVU 结算事务不能修改跨存储的世界书')
-      const updated = await updateBoundWorldbook(resolved, {}, worldInfo)
+      const updated = await observeResourceSave(resourceSaveSummary('worldbook', resolved.record.localChatId ? 'session' : resolved.record.source.kind === 'card' ? 'card' : 'worldbook', current.entries, worldInfo.entries, true), () => updateBoundWorldbook(resolved, {}, worldInfo), summary => options.recordResourceSave?.(sessionId, summary))
       return { updated: true, worldbook: projectTavernHelperWorldbook(updated.view), worldInfo: await exportBoundWorldbook(updated) }
     })
   }
@@ -318,24 +384,54 @@ export function createTavernScriptHostAdapter(options = {}) {
     if (!chat || !['story', 'script'].includes(chat.mode) || (typeof options.isPlayChat === 'function' && !options.isPlayChat(chat))) throw new Error('当前会话没有绑定游玩对话')
   }
 
-  async function readFullPromptTemplateState(sessionId) {
-    const chat = await resolveChat(sessionId)
+  async function readFullPromptTemplateState(sessionId, cursor) {
+    const selected=await options.resolveChatSlice?.(sessionId,[])
+    const reuse=selected?.denseMessages && syncTemplateState.matches(cursor,selected.chat)
+    const reader = syncTemplateState.reader(cursor)
+    let changed = !reuse && selected?.denseMessages && reader?.chatId === selected.chat.id
+      && reader.sessionId === selected.chat.sessionId
+      && reader.lifecycle === (selected.chat.tavernHelperLifecycleRevision || 0)
+      ? await options.resolveChangedChatSlice?.(sessionId, reader.revision) : undefined
+    if (!changed?.denseMessages || changed.chat.id !== reader?.chatId
+      || changed.chat.sessionId !== reader?.sessionId
+      || (changed.chat.tavernHelperLifecycleRevision || 0) !== reader?.lifecycle) changed = undefined
+    const chat = reuse ? selected.chat : changed ? changed.chat : await resolveChat(sessionId)
     assertTemplateChat(chat)
     const card = await options.readCard(chat)
-    const record = await options.worldBooks.bound(chat.cardPath, card, chat)
-    const book = record ? await exportBoundWorldbook(record) : null
-    const worldName = str(record?.view?.displayName)
+    let templateBook
+    if (options.worldBooks.templateSnapshot) templateBook = await options.worldBooks.templateSnapshot(chat.cardPath, card, chat)
+    else {
+      const record = await options.worldBooks.bound(chat.cardPath, card, chat)
+      const book = record ? await exportBoundWorldbook(record) : null
+      const worldName = str(record?.view?.displayName)
+      templateBook = { worldName, worldbooks: worldName && book ? { [worldName]: book } : {} }
+    }
+    const { worldName, worldbooks } = templateBook
     const extensionSettings = options.fullExtensionSettings ? await options.fullExtensionSettings.read() : {}
     extensionSettings.variables = { ...extensionSettings.variables, global: options.globalVariables ? await options.globalVariables.read() : {} }
     if (!Array.isArray(extensionSettings.regex)) extensionSettings.regex = []
-    const character = { ...card, data: { ...card, extensions: { ...card.extensions, ...(worldName ? { world: worldName } : {}) } } }
-    return {
+    const characters = templateCharacters(JSON.stringify([chat.cardPath, worldName]), card, source => {
+      return [{ ...source, data: { ...source, extensions: { ...source.extensions, ...(worldName ? { world: worldName } : {}) } } }]
+    })
+    const snapshot = {
+      capabilities: {statePatch:1},
       state: projectFullPromptTemplateState(chat),
-      environment: { characters: [character], name1: str(chat.macroState?.userName) || '你', name2: str(card.name),
-        this_chid: 0, extension_settings: extensionSettings,
+      environment: { characters, name1: str(chat.macroState?.userName) || '你', name2: str(card.name),
+        this_chid: '0', extension_settings: extensionSettings,
         world_names: worldName ? [worldName] : [], selected_world_info: [],
-        worldbooks: worldName && book ? { [worldName]: book } : {} }
+        worldbooks,
+        dsh: { settling: settlementTransactions.has(str(sessionId)) || ['pending', 'running'].includes(chat.settleStatus), cardPath: chat.cardPath, model: options.modelFor ? await options.modelFor(chat) : chat.model?.model || chat.model || '', regexScripts: card.extensions?.regex_scripts || [] } }
     }
+    if (changed) {
+      const indices = [...changed.indices]
+      if (chat.promptTemplateInput?.message) indices.push(changed.messageCount)
+      return syncTemplateState.selected(snapshot,cursor,indices,changed.messageCount+(chat.promptTemplateInput?.message?1:0),changed.baseRevision)
+        || await readFullPromptTemplateState(sessionId)
+    }
+    if (!reuse) return syncTemplateState(snapshot,cursor)
+    // A concurrent reader may have consumed the same cursor while resources loaded.
+    return syncTemplateState.unchanged(snapshot,cursor,selected.messageCount+(chat.promptTemplateInput?.message?1:0))
+      || await readFullPromptTemplateState(sessionId)
   }
 
   async function saveFullPromptTemplateGlobals(sessionId, variables, expectedVariables) {
@@ -346,10 +442,19 @@ export function createTavernScriptHostAdapter(options = {}) {
     return { updated: true, variables: saved }
   }
 
+  async function readGlobalPromptTemplateSettings() {
+    if (!options.fullExtensionSettings) throw new Error('完整模板设置存储未连接')
+    return { settings: (await options.fullExtensionSettings.read()).EjsTemplate }
+  }
+
   async function saveFullPromptTemplateSettings(sessionId, settings, expectedSettings) {
+    assertTemplateChat(await resolveChat(sessionId))
+    return saveGlobalPromptTemplateSettings(settings, expectedSettings)
+  }
+
+  async function saveGlobalPromptTemplateSettings(settings, expectedSettings) {
     assertPluginJson(settings, '模板设置')
     if (expectedSettings !== undefined) assertPluginJson(expectedSettings, '模板设置读取版本')
-    assertTemplateChat(await resolveChat(sessionId))
     if (!options.fullExtensionSettings) throw new Error('完整模板设置存储未连接')
     const current = await options.fullExtensionSettings.read()
     const base = { ...current }
@@ -359,27 +464,63 @@ export function createTavernScriptHostAdapter(options = {}) {
     return { updated: true, settings: saved.EjsTemplate }
   }
 
+  // Common variable/display writes keep their native row indices and exact revision.
+  // Stale versions and body/swipe edits retain the full three-way merge below.
+  async function saveTemplatePatch(sessionId, request) {
+    if(!options.resolveChatSlice || !options.patchChat || !Array.isArray(request?.changes))return undefined
+    const allowed=['variables','variables_initialized','is_ejs_processed','template_display','template_rendered']
+    if(request.changes.some(c=>!Array.isArray(c.path) || !(c.path[0]==='chat_metadata' || c.path[0]==='chat' && Number.isSafeInteger(c.path[1]) && c.path[1]>=0 && allowed.includes(c.path[2]))))return undefined
+    const indices=[...new Set(request.changes.filter(c=>c.path[0]==='chat').map(c=>c.path[1]))].sort((a,b)=>a-b)
+    const head=await options.resolveChatSlice(sessionId,[])
+    if(!head?.denseMessages || head.chat._storageRevision!==request.stateRevision)return undefined
+    const virtual=head.chat.promptTemplateInput?.message ? head.messageCount : -1
+    if(indices.some(i=>i>=head.messageCount && i!==virtual))return undefined
+    const storedIndices=indices.filter(i=>i<head.messageCount)
+    const selected=storedIndices.length ? await options.resolveChatSlice(sessionId,storedIndices) : head
+    if(!selected?.denseMessages || selected.chat._storageRevision!==request.stateRevision)return undefined
+    const projectedIndices=[...storedIndices,...(virtual>=0?[virtual]:[])]
+    const baseline=selected.chat
+    assertTemplateChat(baseline)
+    if(settlementTransactions.has(str(sessionId)))throw new Error('MVU 结算进行中，模板存档不能覆盖结算事务')
+    const compact={...request,changes:request.changes.map(c=>c.path[0]==='chat'?{...c,path:['chat',projectedIndices.indexOf(c.path[1]),...c.path.slice(2)]}:c)}
+    const expanded=expandFullPromptTemplatePatch(baseline,compact)
+    const next=applyFullPromptTemplateState(baseline,baseline,expanded)
+    // No body rewrites on this path: native message history needs no resynchronization.
+    const changes=diffJson(baseline,next).map(c=>c.path[0]==='messages'?{...c,path:['messages',storedIndices[c.path[1]],...c.path.slice(2)]}:c)
+    const saved=await options.patchChat(baseline.id,request.stateRevision,changes,{source:'prompt-template.state',assertCurrent:()=>{if(settlementTransactions.has(str(sessionId)))throw new Error('MVU 结算进行中，模板存档不能覆盖结算事务')}})
+    if(!saved)return undefined
+    const receipt=diffJson(expanded,{...projectFullPromptTemplateState(next),stateRevision:saved._storageRevision})
+    return {updated:true,statePatch:receipt.map(c=>c.path[0]==='chat'?{...c,path:['chat',projectedIndices[c.path[1]],...c.path.slice(2)]}:c)}
+  }
+
   async function saveFullPromptTemplateState(sessionId, request) {
-    validateFullPromptTemplateSave(request)
+    const fast=await saveTemplatePatch(sessionId,request)
+    if(fast)return fast
+    const patch = Array.isArray(request?.changes)
+    if (!patch) validateFullPromptTemplateSave(request)
     const chat = await resolveChat(sessionId)
     assertTemplateChat(chat)
     if (!options.readChatRevision || !options.updateChat) throw new Error('模板原生存储未连接')
     if (settlementTransactions.has(str(sessionId))) throw new Error('MVU 结算进行中，模板存档不能覆盖结算事务')
     const baseline = await options.readChatRevision(chat.id, request.stateRevision)
+    if (patch) request = expandFullPromptTemplatePatch(baseline, request)
     const saved = await options.updateChat(chat.id, async latest => {
       assertTemplateChat(latest)
       if (settlementTransactions.has(str(sessionId))) throw new Error('MVU 结算进行中，模板存档不能覆盖结算事务')
       if (str(latest.sessionId) !== str(sessionId)) throw new Error('模板聊天已切换')
-      return applyFullPromptTemplateState(latest, baseline, request)
+      const next = applyFullPromptTemplateState(latest, baseline, request)
+      return options.prepareTemplateHistory ? await options.prepareTemplateHistory(latest, next) : next
     }, { source: 'prompt-template.state' })
     if (!saved) throw new Error('模板聊天已不存在')
-    return { updated: true, state: projectFullPromptTemplateState(saved) }
+    await options.synchronizeTemplateHistory?.(saved)
+    const state = projectFullPromptTemplateState(saved)
+    return patch ? {updated:true,statePatch:diffJson(request,state)} : {updated:true,state}
   }
 
   async function saveExtensionSettings(sessionId, settings, expectedSettings) {
     await assertScriptEnabled(await resolveChat(sessionId))
     if (!options.extensionSettings) throw new Error('插件设置存储未连接')
-    const extensionSettings = await options.extensionSettings.save(settings, expectedSettings)
+    const extensionSettings = await observeResourceSave(resourceSaveSummary('regex', 'global', expectedSettings?.regex, settings?.regex, true), () => options.extensionSettings.save(settings, expectedSettings), summary => options.recordResourceSave?.(sessionId, summary))
     if (typeof options.extensionSettingsChanged === 'function') await options.extensionSettingsChanged(str(sessionId))
     return { updated: true, extensionSettings }
   }
@@ -407,6 +548,9 @@ export function createTavernScriptHostAdapter(options = {}) {
 
   async function dispatchEvent(input = {}) {
     const eventContext = input.context || await context(input.sessionId, input.chat, input.transientUserText)
+    // Context preparation can await I/O before MVU has queued its dispatch.
+    // Respect that reservation just as dispatch respects an executing event.
+    if (settlementTransactions.has(str(input.sessionId))) return { handled: false, busy: true, args: structuredClone(input.args || []) }
     return await options.scriptDispatch.dispatch(input.sessionId, input.name, input.args, eventContext)
   }
 
@@ -432,19 +576,41 @@ export function createTavernScriptHostAdapter(options = {}) {
     }
     const command = str(input.command).trim()
     if (command === '') throw new Error('MVU 变量结算命令为空')
+    // resolveChat awaited above: another attempt may have reserved this session
+    // in the meantime. Never overwrite its draft or release its ownership.
+    if (settlementTransactions.has(sessionId)) throw new Error('当前对话已有 MVU 变量结算正在执行')
+    // An earlier lifecycle event still owns the executor. Installing an MVU
+    // transaction now would reject its legitimate writes during context loading,
+    // even though dispatch would eventually return busy and defer this attempt.
+    const beforeDispatch = options.scriptDispatch.status?.(sessionId)
+    if (beforeDispatch?.busy) {
+      await record('runtime-deferred', { availability: beforeDispatch })
+      return { updated: false, deferred: true, context: projectTavernHelperContext(current) }
+    }
     const originalText = str((message.swipes && message.swipes[swipeId]) ?? message.sourceText ?? message.text)
     const transaction = {
       draft: structuredClone(current),
-      eventId: operationId + ':' + (str(input.diagnosticId).trim() || 'runtime'),
+      eventId: 'mvu-work:' + randomUUID(),
       messageId,
       swipeId,
       mutations: 0
+    }
+    if (input.baselineVariables) {
+      const target = transaction.draft.messages[messageId]
+      if (!Array.isArray(target.variables)) target.variables = []
+      target.variables[swipeId] = structuredClone(input.baselineVariables)
     }
     settlementTransactions.set(sessionId, transaction)
     try {
       const eventContext = await context(sessionId, transaction.draft)
       const projected = eventContext.messages[messageId]
       if (!projected) throw new Error('MVU 变量结算投影楼层不存在')
+      // Upstream MVU reads the previous valid floor as its update baseline.
+      // Override only the dispatch projection; historical floors stay untouched.
+      if (input.baselineVariables) {
+        const prior = eventContext.messages.slice(0, messageId).findLast(item => item.variables?.stat_data !== undefined && item.variables?.schema !== undefined)
+        if (prior) prior.variables = structuredClone(input.baselineVariables)
+      }
       const internalText = str(input.storyText).trim() + '\n\n' + command
       projected.message = internalText
       if (!Array.isArray(projected.swipes)) projected.swipes = [originalText]
@@ -470,11 +636,11 @@ export function createTavernScriptHostAdapter(options = {}) {
         await record('runtime-deferred', { availability })
         return { updated: false, deferred: true, context: projectTavernHelperContext(current) }
       }
-      const dispatched = await options.scriptDispatch.dispatch(sessionId, 'MESSAGE_RECEIVED', [messageId], eventContext, { eventId: transaction.eventId })
-      await record('runtime-completed', { handled: dispatched.handled === true, timedOut: dispatched.timedOut === true, claimTimedOut: dispatched.claimTimedOut === true, phase: dispatched.phase, disposed: dispatched.disposed === true, error: dispatched.error, diagnostics: dispatched.diagnostics || [] })
+      const dispatched = await options.scriptDispatch.dispatch(sessionId, 'MESSAGE_RECEIVED', [messageId], eventContext, { eventId: transaction.eventId, signal: input.signal })
+      await record('runtime-completed', { handled: dispatched.handled === true, timedOut: dispatched.timedOut === true, executionLost: dispatched.executionLost === true, claimTimedOut: dispatched.claimTimedOut === true, phase: dispatched.phase, disposed: dispatched.disposed === true, error: dispatched.error, diagnostics: dispatched.diagnostics || [] })
       if (dispatched.handled !== true) {
         if (dispatched.initializationFailed === true) return await initializationRejected(str(dispatched.error))
-        if (dispatched.unavailable === true) {
+        if (dispatched.unavailable === true || (input.durable === true && (dispatched.disposed === true || dispatched.timedOut === true || /超时|timed?\s*out|timeout/i.test(str(dispatched.error))))) {
           await record('runtime-deferred', { availability: options.scriptDispatch.status?.(sessionId) })
           return { updated: false, deferred: true, context: projectTavernHelperContext(current) }
         }
@@ -500,7 +666,13 @@ export function createTavernScriptHostAdapter(options = {}) {
       settled.text = originalText
       settled.sessionText = originalText
       settled.displayText = originalText
-      const beforeVariables = projectTavernHelperContext(current).messages[messageId].variables
+      if (input.preserveForeground === true) {
+        for (const key of ['swipes', 'sourceText', 'projectionText', 'text', 'sessionText', 'displayText']) {
+          if (Object.hasOwn(message, key)) settled[key] = structuredClone(message[key])
+          else delete settled[key]
+        }
+      }
+      const beforeVariables = input.baselineVariables || projectTavernHelperContext(current).messages[messageId].variables
       const proposedContext = projectTavernHelperContext(transaction.draft)
       const validation = typeof input.validate === 'function'
         ? await input.validate({ before: beforeVariables, after: proposedContext.messages[messageId].variables })
@@ -554,6 +726,8 @@ export function createTavernScriptHostAdapter(options = {}) {
     readFullPromptTemplateState,
     saveFullPromptTemplateState,
     saveFullPromptTemplateSettings,
+    readGlobalPromptTemplateSettings,
+    saveGlobalPromptTemplateSettings,
     saveFullPromptTemplateGlobals,
     saveExtensionSettings,
     saveChatData,
@@ -561,6 +735,7 @@ export function createTavernScriptHostAdapter(options = {}) {
     saveWorldInfo,
     claimWork: function (sessionId, runtimeId, ready, initializationError) { return options.scriptDispatch.claim(sessionId, runtimeId, ready, initializationError) },
     startWork: function (sessionId, eventId, leaseToken, runtimeId) { return options.scriptDispatch.start(sessionId, eventId, leaseToken, runtimeId) },
+    workState: function (sessionId, eventId, leaseToken, runtimeId, keepAlive) { return options.scriptDispatch.workState(sessionId, eventId, leaseToken, runtimeId, keepAlive) },
     heartbeatRuntime: function (sessionId, runtimeId, ready, initializationError) { return { active: options.scriptDispatch.touch(sessionId, runtimeId, ready, initializationError) } },
     completeEvent: function (sessionId, eventId, args, runtimeId, leaseToken, error, diagnostics) { return options.scriptDispatch.complete(sessionId, eventId, args, runtimeId, leaseToken, error, diagnostics) },
     releaseRuntime: function (sessionId, runtimeId) { return options.scriptDispatch.dispose(sessionId, runtimeId) }

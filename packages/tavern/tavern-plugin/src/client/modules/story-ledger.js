@@ -1,5 +1,6 @@
 // Player-only notebook. No prompt construction or model access in this view.
 function TavernLedger(props) {
+  const askConfirm = useTavernConfirm(props.sessionId);
   const h = React.createElement;
   const ledger = props.ledger || { items: [], npcs: [], scenes: [], itemLog: [], locationPath: [], updatedTurn: null };
   const [open, setOpen] = React.useState(true);
@@ -41,8 +42,8 @@ function TavernLedger(props) {
     } else ops = { [e.original ? "update" : "add"]: [item] };
     void submit({ [e.kind]: ops }, e.expected);
   }
-  function remove(row) {
-    if (!window.confirm(tab === "scenes" ? "删除这个地点及其下属地点？" : "删除这条台账记录？")) return;
+  async function remove(row) {
+    if (!await askConfirm(tab === "scenes" ? "删除这个地点及其下属地点？" : "删除这条台账记录？")) return;
     void submit({ [tab]: { remove: [tab === "scenes" ? row.path : row.name] } }, JSON.stringify(ledger));
   }
   function actions(row) { return h("span", { className: "dsh-ledger-actions" },

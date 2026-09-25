@@ -16,7 +16,7 @@ import { createSceneImageDiagnostics } from '../../tavern-plugin/lib/domain/scen
 import { createMvuDiagnosticStore, createMvuDiagnosticExport } from '../../tavern-plugin/lib/domain/mvu-diagnostics.js'
 import { assertImageToolSchema } from './assert-image-tool-schema.mjs'
 
-export async function createSceneImageNativeRuntime(bootPath, { unifiedPlugin = false } = {}) {
+export async function createSceneImageNativeRuntime(bootPath, { unifiedPlugin = false, systemAppend, resolveModelSelection, beforeModelRequest, residentOptions = {} } = {}) {
   const bootUrl = pathToFileURL(bootPath)
   const { boot } = await import(bootUrl.href)
   const { LlmAdapter } = await import(new URL('../../dsh-llm/lib/index.js', bootUrl))
@@ -36,8 +36,12 @@ export async function createSceneImageNativeRuntime(bootPath, { unifiedPlugin = 
   const sharp = createRequire(new URL('../../dsh-attachment-local/lib/index.js', bootUrl))('sharp')
   const png = await sharp({ create: { width: 320, height: 180, channels: 3, background: '#789aab' } }).png().toBuffer()
   class FixtureModel extends LlmAdapter {
+    async resolveModel(provider, model) {
+      return { provider, id: model, name: model, reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'low', name: 'Low' }] } }
+    }
     async *stream(input) {
-      requests.push(structuredClone({ system: input.system, messages: input.messages, tools: input.tools }))
+      await beforeModelRequest?.(input)
+      requests.push(structuredClone({ model: input.model, reasoningEffort: input.reasoningEffort, maxTokens: input.maxTokens, system: input.messages.filter(message => message.role === 'system').flatMap(message => message.content).map(block => block.text || '').join('\n\n'), messages: input.messages, tools: input.tools }))
       for (const tool of input.tools || []) assertImageToolSchema(tool)
       const currentMessages = input.messages.slice(Math.max(0, input.messages.findLastIndex(message => message.source?.kind === 'plugin')))
       const referenceResult = currentMessages.flatMap(message => message.content || []).find(block => block.type === 'tool-result' && block.toolCallId === 'reference-call')
@@ -111,9 +115,14 @@ export async function createSceneImageNativeRuntime(bootPath, { unifiedPlugin = 
       yield { type: 'finish', reason: { kind: tool ? 'tool-calls' : 'stop' } }
     }
   }
-  ctx.llm.registerAdapter(['scene-fixture'], new FixtureModel())
+  ctx.llm.registerAdapter(['scene-fixture', 'scene-fixture-other', 'deepseek-official'], new FixtureModel())
+  for (const name of ['skill', 'tavern_read_skill_reference', 'web_search']) ctx.tools.register({
+    name, description: 'Fixture tool', parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    async execute() { return 'fixture' }
+  })
   const parent = await ctx.agents.create({ sessionId: 'scene-parent', agentOptions: { provider: 'scene-fixture', model: 'fixture-text' } })
-  const runnerOptions = { agents: ctx.agents, flushSession: session => ctx.sessions.flush(session) }
+  const runnerOptions = { ...residentOptions, systemAppend, resolveModelSelection, agents: ctx.agents, flushSession: session => ctx.sessions.flush(session) }
   let runner = createBackgroundAgentRunner(runnerOptions)
   const chat = { id: 'scene-chat', sessionId: 'scene-parent', mode: 'story', posture: '站在窗边，左手扶窗', messages: [{ role: 'assistant', turn: 1, greeting: true, sourceText: '她站在窗边看雨，左手轻轻搭着窗框。', swipes: ['她站在窗边看雨，左手轻轻搭着窗框。', '她坐在椅子上。'], swipeId: 0 }] }
   const before = JSON.stringify(chat)
@@ -177,7 +186,7 @@ export async function createSceneImageNativeRuntime(bootPath, { unifiedPlugin = 
   const endpoint = 'http://127.0.0.1:' + imageServer.address().port + '/v1'
   await service.configure({ model: 'fixture-image', baseURL: endpoint, apiKey: keys.get(IMAGE_CREDENTIAL) })
   await service.configure({ enabled: true })
-  return { get service() { return service }, get agentRunning() { return agentRuns > 0 }, chat, before, requests, imageRequests, parent, endpoint,
+  return { reapBackground: () => runner.reapIdle(), backgroundLoaded: id => ({ agent: !!ctx.agents.get(id), session: !!ctx.sessions.get(id) }), runBackground: input => runner.run(input), get service() { return service }, get agentRunning() { return agentRuns > 0 }, chat, before, requests, imageRequests, parent, endpoint,
     traceEvents(sessionId) { return structuredClone(sessionEvents(ctx.sessions.get(sessionId))) },
     failNext(status = 503, message = 'test failure') { failNext = { status, message } },
     failNextSave() { failSave = true },

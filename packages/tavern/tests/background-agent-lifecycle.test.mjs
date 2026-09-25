@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { createStoryTimeline } from '../tavern-plugin/lib/domain/story-timeline.js'
+import { createBackgroundTaskCoordinator } from '../tavern-plugin/lib/domain/background-task-coordinator.js'
 import { createBackgroundAgentRunner } from '../tavern-plugin/lib/background-agent-runner.js'
 
 function deferred() {
@@ -11,12 +13,13 @@ async function until(condition) {
   for (let n = 0; n < 100; n++) { if (condition()) return; await new Promise(resolve => setImmediate(resolve)) }
   throw new Error('Agent 未到达预期阶段')
 }
-function harness({ work = async () => {}, flush = async () => {}, dispose = async () => {}, needsNewBackgroundSession } = {}) {
+function harness({ work = async () => {}, flush = async () => {}, dispose = async () => {}, compactWork = async () => {}, needsNewBackgroundSession, resume } = {}) {
   const children = new Map(), starts = [], calls = [], disposals = [], tools = new Map()
   let seq = 0
   const runner = createBackgroundAgentRunner({ id: () => 'child-' + ++seq, flushSession: flush, needsNewBackgroundSession,
-    compactAgent: async agent => { calls.push(['compact', agent.session.id]); return { message: 'compacted' } },
+    compactAgent: async agent => { calls.push(['compact', agent.session.id]); await compactWork(); return { message: 'compacted' } },
     agents: {
+      ...(resume ? { resume } : {}),
       get(id) { if (id.startsWith('game-')) return { id, session: { header: {} } } },
       async create(options) {
         calls.push(['create', options.sessionId])
@@ -129,3 +132,99 @@ test('公共Runner缺少宿主时保留原有错误', () => {
  fresh = false
  assert.equal((await h.runner.run(h.input())).traceSessionId, next.traceSessionId)
  })
+
+test('替代后台会话后释放旧实例与请求引用，只保留最新实例', async t => {
+  const h = harness({ needsNewBackgroundSession: async () => true })
+  t.after(() => h.runner.dispose())
+  const ids = []
+  for (let i = 0; i < 5; i++) ids.push((await h.runner.run(h.input())).traceSessionId)
+  assert.deepEqual(h.disposals, ids.slice(0, -1))
+  for (const id of ids.slice(0, -1)) {
+    assert.equal(h.runner.owns(id), false)
+    assert.equal(h.runner.requestSession(id), null)
+    assert.equal(h.runner.requestContext(id), null)
+  }
+  assert.equal(h.runner.owns(ids.at(-1)), true)
+})
+
+test('替代一个游戏的后台不会释放其他游戏正在运行的后台', async t => {
+  const gate = deferred()
+  const h = harness({ needsNewBackgroundSession: async () => true, work: call => call.text.includes('等待') ? gate.promise : Promise.resolve() })
+  t.after(() => h.runner.dispose())
+  const running = h.runner.run(h.input({ sessionId: 'game-b', system: '等待' }))
+  await until(() => h.starts.length === 1)
+  const other = h.starts[0].id
+  const first = await h.runner.run(h.input())
+  await h.runner.run(h.input())
+  assert.deepEqual(h.disposals, [first.traceSessionId])
+  assert.equal(h.runner.owns(other), true)
+  gate.resolve(); await running
+})
+
+
+test('旧后台正在压缩时延后释放，压缩结束后完成回收', async t => {
+  const gate = deferred()
+  const h = harness({ needsNewBackgroundSession: async () => true, compactWork: () => gate.promise })
+  t.after(() => h.runner.dispose())
+  const old = (await h.runner.run(h.input())).traceSessionId
+  const compacting = h.runner.compact({ sessionId: old })
+  await until(() => h.calls.some(call => call[0] === 'compact'))
+  const latest = (await h.runner.run(h.input())).traceSessionId
+  assert.deepEqual(h.disposals, [])
+  assert.equal(h.runner.owns(old), true)
+  gate.resolve(); await compacting
+  assert.deepEqual(h.disposals, [old])
+  assert.equal(h.runner.owns(latest), true)
+})
+
+test('替代后台任务失败也释放旧实例，新实例仍可继续使用', async t => {
+  let fresh = false, fail = false
+  const h = harness({ needsNewBackgroundSession: async () => fresh, work: async () => { if (fail) throw new Error('model failed') } })
+  t.after(() => h.runner.dispose())
+  const old = (await h.runner.run(h.input())).traceSessionId
+  fresh = true; fail = true
+  await assert.rejects(h.runner.run(h.input()), /model failed/)
+  assert.deepEqual(h.disposals, [old])
+  const latest = h.starts.at(-1).id
+  fresh = false; fail = false
+  assert.equal((await h.runner.run(h.input())).traceSessionId, latest)
+})
+
+
+test('missing background replacement is created only once across failed settlement retries', async t => {
+  const timeline = createStoryTimeline()
+  let chat = { id: 'chat', mode: 'story', messages: [], settleStatus: 'idle' }
+  const coordinator = createBackgroundTaskCoordinator({ timeline, store: {
+    readChat: async () => chat,
+    writeChat: async next => { chat = next },
+    updateChat: async (_id, mutate) => { chat = await mutate(chat); return chat }
+  } })
+  const seed = await coordinator.begin(chat, 'settlement')
+  await seed.commit({ participant: seed.participant({ sessionId: 'missing-old', boundary: 42 }) })
+  const resumed = []
+  let failModel = true
+  const h = harness({
+    resume: async ({ resumeSessionId }) => {
+      resumed.push(resumeSessionId)
+      throw Object.assign(new Error('session missing'), { code: 'SESSION_NOT_FOUND' })
+    },
+    work: async () => { if (failModel) throw new Error('synthetic model timeout') }
+  })
+  t.after(() => h.runner.dispose())
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const task = await coordinator.begin(chat, 'settlement')
+    const requested = task.participantRequest.sessionId
+    await assert.rejects(h.runner.run(h.input({ task: 'settlement', persistentSessionId: requested,
+      onPersistentSessionReady: id => task.bindSession(id)
+    })), error => error.traceSessionId === 'child-1')
+    // Even a stale caller receipt cannot undo the identity published by the runner.
+    await task.fail({ sessionId: requested, boundary: 42 })
+    assert.equal(chat.timeline.participants.background.sessionId, 'child-1')
+  }
+  assert.deepEqual(resumed, ['missing-old'])
+  assert.deepEqual(h.calls.filter(call => call[0] === 'create'), [['create', 'child-1']])
+  failModel = false
+  await h.runner.run(h.input({ task: 'settlement', persistentSessionId: chat.timeline.participants.background.sessionId }))
+  await h.runner.compact({ sessionId: chat.timeline.participants.background.sessionId })
+  assert.deepEqual(h.calls.filter(call => call[0] === 'compact'), [['compact', 'child-1']])
+})

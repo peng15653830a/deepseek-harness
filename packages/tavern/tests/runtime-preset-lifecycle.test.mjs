@@ -124,6 +124,24 @@ test('没有激活前段时不改写 DSH 顶层 system', () => {
   assert.equal(projectRuntimePresetRequest(request, null), request)
 })
 
+for (const phase of ['front', 'back']) test(`V3 native system remains system with ${phase} preset`, () => {
+  const nativeSystem = { id: 'native-system', role: 'system', content: [{ type: 'text', text: '固定人物背景' }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' } }
+  const request = { messages: [
+    { role: 'user', content: [{ type: 'text', text: '开场种子' }] },
+    { role: 'assistant', content: [{ type: 'text', text: '开场白' }] },
+    nativeSystem,
+    { role: 'user', content: [{ type: 'text', text: '继续' }] }
+  ] }
+  const before = structuredClone(request)
+  const projected = projectRuntimePresetRequest(request, { [phase]: { entries: [{ role: 'system', content: '预设要求' }] } })
+  assert.equal(projected.messages[0].role, 'system')
+  assert.ok(projected.messages[0].content.some(b => b.text.includes('固定人物背景')))
+  assert.equal(projected.messages.filter(m => JSON.stringify(m.content).includes('固定人物背景')).length, 1)
+  assert.equal(projected.messages.filter(m => m.role === 'system').length, 1)
+  assert.deepEqual(request, before)
+  assert.equal(projectRuntimePresetRequest(request, null), request)
+})
+
 test('角色归一化不合并或破坏 DSH 工具消息', () => {
   const toolCalls = [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }]
   const request = {

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 function str(value) {
   return typeof value === 'string' ? value : (value === undefined || value === null ? '' : String(value))
 }
@@ -71,7 +73,7 @@ function scoreRound(round, query, terms) {
 
 export const HISTORY_RECALL_TOOL = Object.freeze({
   name: 'tavern_recall_history',
-  description: '检索或读取当前对话已经正式发生的历史正文，仅用于回忆细节和剧情。query 与 turn 必须且只能提供一个。检索结果不是当前场景，不得重复演绎、照搬旧台词或让已经发生的事件再次发生。',
+  description: '检索或读取当前对话已经正式发生的历史正文，仅用于回忆细节和剧情。query 与 turn 必须且只能提供一个。每次生成最多召回 6 次；完整正文召回后冷却 10 个剧情轮次，冷却期间不可重复读取。已有信息足够时直接继续任务，不要重复读取同一轮。检索结果不是当前场景，不得重复演绎、照搬旧台词或让已经发生的事件再次发生。',
   parameters: Object.freeze({
     type: 'object',
     additionalProperties: false,
@@ -88,6 +90,7 @@ export const HISTORY_RECALL_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
   additionalProperties: false,
   properties: {
+    notice: { type: 'string', required: true },
     found: { type: 'boolean', required: true },
     chatId: { type: 'string', required: true },
     revision: { type: 'integer', required: true },
@@ -127,6 +130,12 @@ export const HISTORY_RECALL_OUTPUT_SCHEMA = Object.freeze({
 })
 
 export function createHistoryRecall() {
+  const scopes = new WeakMap()
+  function stateFor(scope) {
+    if (!scope || typeof scope !== 'object') return null
+    if (!scopes.has(scope)) scopes.set(scope, { calls: 0, rounds: new Set(), searches: new Set() })
+    return scopes.get(scope)
+  }
   function recall(input = {}) {
     const chat = input.chat
     if (chat === null || typeof chat !== 'object') throw new Error('历史正文检索缺少 Tavern Chat')
@@ -135,7 +144,16 @@ export function createHistoryRecall() {
     const hasTurn = input.turn !== undefined && input.turn !== null
     if (Number(hasQuery) + Number(hasTurn) !== 1) throw new Error('历史正文检索必须且只能提供 query 或 turn')
     const rounds = committedRounds(chat)
+    const currentTurn = rounds.reduce((maximum, round) => Math.max(maximum, round.turn), 0)
+    const branch = str(chat.timeline?.branchId)
+    const signature = round => createHash('sha256').update(JSON.stringify(round.messages)).digest('hex')
+    const audience = input.audience === 'background' ? 'background' : 'foreground'
+    const cooldowns = input.trackCooldown && Array.isArray(chat.historyRecallCooldowns)
+      ? chat.historyRecallCooldowns.filter(item => item && (item.audience === 'foreground' || item.audience === 'background') && item.branch === branch && currentTurn >= item.at && currentTurn - item.at <= 10)
+      : []
+    const cooling = round => cooldowns.some(item => item.audience === audience && item.turn === round.turn && item.hash === signature(round))
     const base = {
+      notice: '',
       found: false,
       chatId: str(chat.id),
       revision: Math.max(0, Number(chat._storageRevision) || 0),
@@ -145,11 +163,18 @@ export function createHistoryRecall() {
       matches: [],
       rounds: []
     }
+    const state = stateFor(input.scope)
+    if (state && state.calls++ >= 6) {
+      return Object.assign(base, { notice: '本次生成的历史召回预算已用尽。请使用已经返回的资料继续当前任务，不要再调用历史召回。' })
+    }
     if (hasQuery) {
       const terms = termsOf(query)
       if (terms.length === 0) throw new Error('历史正文检索关键词不能为空')
+      const searchKey = JSON.stringify([str(chat.id), [...terms].sort(), clampInteger(input.limit, 5, 1, 8)])
+      if (state?.searches.has(searchKey)) return Object.assign(base, { notice: '相同关键词已检索，请使用之前的结果；仅在缺少必要细节时读取对应轮次。' })
+      state?.searches.add(searchKey)
       const limit = clampInteger(input.limit, 5, 1, 8)
-      const matches = rounds.map(function (round) {
+      const matches = rounds.filter(round => !cooling(round)).map(function (round) {
         const scored = scoreRound(round, query, terms)
         if (scored === null) return null
         return { turn: round.turn, score: scored.score, excerpt: excerpt(scored.text, terms) }
@@ -158,25 +183,42 @@ export function createHistoryRecall() {
       }).slice(0, limit).map(function (match) {
         return { turn: match.turn, excerpt: match.excerpt }
       })
-      return Object.assign(base, { found: matches.length > 0, matches })
+      return Object.assign(base, { found: matches.length > 0, matches, notice: cooldowns.some(item => item.audience === audience) ? '已召回的完整正文处于 10 轮冷却期，检索已跳过这些轮次。' : '' })
     }
     const requested = Number(input.turn)
     if (!Number.isInteger(requested) || requested < 1) throw new Error('历史正文轮次必须是大于 0 的整数')
     const radius = clampInteger(input.radius, 1, 0, 3)
     const selected = rounds.filter(function (round) { return Math.abs(round.turn - requested) <= radius })
-    return Object.assign(base, { found: selected.some(function (round) { return round.turn === requested }), rounds: selected })
+    const cooled = selected.filter(cooling)
+    const fresh = selected.filter(round => {
+      if (cooling(round)) return false
+      const key = JSON.stringify([str(chat.id), round.turn, round.messages])
+      if (state?.rounds.has(key)) return false
+      state?.rounds.add(key)
+      return true
+    })
+    if (input.trackCooldown && fresh.length) {
+      chat.historyRecallCooldowns = cooldowns.filter(item => item.audience !== audience || !fresh.some(round => round.turn === item.turn))
+        .concat(fresh.map(round => ({ turn: round.turn, hash: signature(round), at: currentTurn, branch, audience })))
+    }
+    return Object.assign(base, {
+      found: selected.some(round => round.turn === requested), rounds: fresh,
+      notice: cooled.length ? '第 ' + cooled.map(round => round.turn).join('、') + ' 轮已召回，处于 10 轮冷却期；请使用已有资料继续任务。' : fresh.length < selected.length ? '重叠轮次已读取，本次只补充未返回的正文。请使用之前的资料，不要重复召回。' : ''
+    })
   }
 
   return Object.freeze({ recall })
 }
 
 export function renderHistoryRecall(value) {
-  const warning = '【历史回忆资料】\n以下是已经发生的历史，只用于确认和回忆；不得当作当前场景继续输出，不得重复演绎。'
+  let warning = '【历史回忆资料】\n以下是已经发生的历史，只用于确认和回忆；不得当作当前场景继续输出，不得重复演绎。'
+  if (value?.notice) warning += '\n\n' + value.notice
+  if (value?.notice && !value.rounds?.length && !value.matches?.length) return warning
   if (!value || value.found !== true) return warning + '\n\n没有找到相关历史正文。'
   if (value.mode === 'search') {
     return warning + '\n\n' + value.matches.map(function (match) {
       return '[第 ' + match.turn + ' 轮]\n' + match.excerpt
-    }).join('\n\n') + '\n\n需要完整上下文时，请用 turn 读取对应轮次。'
+    }).join('\n\n') + '\n\n仅在摘要不足以回答当前问题时，用 turn 读取所需轮次；信息足够就继续当前任务。'
   }
   return warning + '\n\n' + value.rounds.map(function (round) {
     return '【第 ' + round.turn + ' 轮】\n' + round.messages.map(function (message) {

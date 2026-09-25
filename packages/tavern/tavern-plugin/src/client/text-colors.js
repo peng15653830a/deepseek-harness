@@ -30,20 +30,26 @@ function installTavernTextColors(root, options, findQuotes) {
     let enabled = options.enabled !== false, disposed = false, timer = null;
     const excluded = 'script,style,textarea,input,select,button,a,code,pre,kbd,samp,svg,math,[hidden],[contenteditable]:not([contenteditable="false"]),[role="button"],[role="textbox"]';
     const blocks = 'p,div,li,td,th,blockquote,section,article,h1,h2,h3,h4,h5,h6';
+    // A refresh reads the same ancestors for many text nodes. Cache only for this
+    // synchronous pass so later theme/card mutations always get fresh styles.
+    let computedColors, explicitColors;
+    function computedColor(element) {
+        if (!computedColors.has(element)) computedColors.set(element, win.getComputedStyle(element).color);
+        return computedColors.get(element);
+    }
     function explicitColor(element) {
-        for (let current = element; current; current = current.parentElement) {
-            if (current.hasAttribute('color') || current.style.color || current.style.webkitTextFillColor) return true;
-            // A block's baseline color is not a specialized dialogue/emphasis color.
-            if (current.matches('span,font,q,em,i,b,strong,u,mark') && current.parentElement
-                && win.getComputedStyle(current).color !== win.getComputedStyle(current.parentElement).color) return true;
-            if (current === root) break;
-        }
-        return false;
+        if (explicitColors.has(element)) return explicitColors.get(element);
+        const own = element.hasAttribute('color') || Boolean(element.style.color || element.style.webkitTextFillColor)
+            || (element.matches('span,font,q,em,i,b,strong,u,mark') && element.parentElement
+                && computedColor(element) !== computedColor(element.parentElement));
+        const result = Boolean(own || (element !== root && element.parentElement && explicitColor(element.parentElement)));
+        explicitColors.set(element, result);
+        return result;
     }
     const paletteCache = new Map();
     let canvas;
     function palette(element) {
-        const color = win.getComputedStyle(element).color;
+        const color = computedColor(element);
         if (paletteCache.has(color)) return paletteCache.get(color);
         let rgb = color.match(/[\d.]+/g) || [];
         if (!/^rgba?\(/.test(color)) {
@@ -65,6 +71,7 @@ function installTavernTextColors(root, options, findQuotes) {
         timer = null;
         for (const highlight of highlights.values()) highlight.clear();
         if (disposed || !enabled) return;
+        computedColors = new WeakMap(); explicitColors = new WeakMap();
         const walker = doc.createTreeWalker(root, 4); // SHOW_TEXT; never edit React/card-owned DOM.
         let group = [], block = null, text = '';
         function flush() {
@@ -92,10 +99,17 @@ function installTavernTextColors(root, options, findQuotes) {
     const observer = new win.MutationObserver(schedule);
     observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['style', 'class', 'color', 'hidden'] });
     if (doc.documentElement !== root) observer.observe(doc.documentElement, { attributes: true, attributeFilter: ['style', 'class'] });
-    refresh();
+    // Batch mounts before reading computed styles; each message adds a stylesheet.
+    schedule();
     return {
         setColors,
-        setEnabled(value) { enabled = value !== false; if (timer !== null) win.clearTimeout(timer); refresh(); },
+        setEnabled(value) {
+            enabled = value !== false;
+            if (timer !== null) win.clearTimeout(timer);
+            timer = null;
+            if (enabled) schedule();
+            else for (const highlight of highlights.values()) highlight.clear();
+        },
         dispose() {
             disposed = true; observer.disconnect(); if (timer !== null) win.clearTimeout(timer);
             for (const kind of highlights.keys()) win.CSS.highlights.delete(prefix + '-' + kind);

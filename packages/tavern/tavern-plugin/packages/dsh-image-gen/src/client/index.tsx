@@ -360,11 +360,10 @@ const STYLE = `
 /* 3. Grid & Responsive Cards */
 .dsh-ig-gallery-page-body{flex:1;overflow-y:auto;padding:20px 24px}
 .dsh-ig-gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:18px}
-.dsh-ig-gallery-card{background:var(--dsw-alias-bg-layer-2,#ffffff);border:1px solid var(--dsw-alias-border-l2,#e2e8f0);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}
-.dsh-ig-gallery-card:hover{transform:translateY(-2px);box-shadow:0 10px 20px -5px rgba(0,0,0,0.06),0 4px 6px -2px rgba(0,0,0,0.03);border-color:var(--dsw-alias-border-l1,#cbd5e1)}
+.dsh-ig-gallery-card{background:var(--dsw-alias-bg-layer-2,#ffffff);border:1px solid var(--dsw-alias-border-l2,#e2e8f0);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color .18s ease}
+@media (hover:hover) and (pointer:fine){.dsh-ig-gallery-card:hover{border-color:var(--dsw-alias-border-l1,#cbd5e1)}}
 .dsh-ig-gallery-card-media{position:relative;width:100%;aspect-ratio:1/1;background:#f1f5f9;overflow:hidden;display:flex;align-items:center;justify-content:center}
-.dsh-ig-gallery-card-img{width:100%;height:100%;object-fit:cover;transition:transform .2s ease}
-.dsh-ig-gallery-card:hover .dsh-ig-gallery-card-img{transform:scale(1.03)}
+.dsh-ig-gallery-card-img{width:100%;height:100%;object-fit:cover}
 .dsh-ig-gallery-card-loading{font-size:12px;color:#94a3b8}
 .dsh-ig-gallery-card-error{font-size:12px;color:#ef4444;padding:8px;text-align:center}
 
@@ -424,7 +423,9 @@ const STYLE = `
 .dsh-ig-lightbox-btn:hover{background:rgba(255,255,255,0.22)}
 .dsh-ig-lightbox-btn-danger{border-color:rgba(239,68,68,0.4);color:#fca5a5}
 .dsh-ig-lightbox-btn-danger:hover{background:rgba(239,68,68,0.35)!important;color:#fff!important;border-color:rgba(239,68,68,0.7)!important}
-.dsh-ig-gallery-page-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:8px;font-size:13px;z-index:99999;animation:dsh-ig-fade .15s}
+.dsh-ig-gallery-page-toast{position:fixed;bottom:24px;left:50%;opacity:1;transform:translate(-50%,0);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:8px;font-size:13px;z-index:99999;animation:dshIgPageToast 150ms cubic-bezier(0.23,1,0.32,1)}
+@keyframes dshIgPageToast{from{opacity:0;transform:translate(-50%,6px)}}
+@media (prefers-reduced-motion:reduce){.dsh-ig-gallery-page-toast{animation:none}}
 
 /* Card selection and checkbox */
 .dsh-ig-gallery-card.is-selected{box-shadow:0 0 0 2px var(--dsw-alias-brand-primary,#2563eb);border-color:transparent}

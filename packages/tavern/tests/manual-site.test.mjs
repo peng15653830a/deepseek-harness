@@ -70,7 +70,7 @@ test('安装页提供与完整安装说明一致的可复制命令、当前适�
     assert.ok(installationGuide.includes(command), 'Installation command must match installation guide')
     assert.ok(install.includes(`<code>${escapeHTML(command)}</code>`), 'Commands must remain literal text')
   }
-  for (const term of ['方式一：桌面版', '方式二：命令行版', 'Open DSH Terminal', '配置模型并开始第一局', '关机后如何重新打开', '更新与重新安装', 'Android：通过 DSHA 安装', '安装失败时', adaptedDshVersion]) assert.ok(install.includes(term), term)
+  for (const term of ['纯小白一键安装（仅 Windows x64）', 'DSH Desktop 安装（Windows / macOS）', '方式二：命令行版', '打开 DSH 终端', '当前目录（直接回车选这一项）', 'DSH_TAVERN_CLI_HOME', '配置模型并开始第一局', '关机后如何重新打开', '更新与重新安装', 'Android：通过 DSHA 安装', '安装失败时', adaptedDshVersion]) assert.ok(install.includes(term), term)
   assert.match(install, /class="copy-code"/)
   assert.match(install, /不要分享给别人/)
   assert.doesNotMatch(install, /\{\{dshVersion\}\}|```/)
@@ -118,7 +118,7 @@ test('文档只采用独立样例截图，不复用旧图片或加载远程脚�
   const frames = [...html.matchAll(/<iframe\b[^>]*>/g)].map(match => match[0])
   assert.equal(frames.length, 1)
   assert.match(frames[0], /src="https:\/\/player\.bilibili\.com\/player\.html\?/)
-  assert.match(frames[0], /bvid=BV1Bibx61EAC/)
+  assert.match(frames[0], /bvid=BV1NAeq6iELC/)
   assert.match(frames[0], /autoplay=0/)
   assert.match(frames[0], /title="[^"]+"/)
   assert.doesNotMatch(html, /<script[^>]+src="https?:/)
@@ -135,8 +135,10 @@ test('截图有有效本地资源、替代文字、说明、来源与放大入�
   for (const [id, keys] of Object.entries(pageScreenshots)) {
     const body = pages.find(p => p.id === id)?.body
     assert.ok(body, id)
-    assert.ok(body.includes(screenshotSource.label))
-    assert.ok(body.includes(screenshotSource.runtime))
+    if (!keys.length) continue
+    const source = screenshots[keys[0]].source || screenshotSource
+    assert.ok(body.includes(source.label))
+    assert.ok(body.includes(source.runtime))
     for (const key of keys) {
       const shot = screenshots[key]
       assert.ok(shot?.alt && shot?.caption, key)
@@ -144,8 +146,8 @@ test('截图有有效本地资源、替代文字、说明、来源与放大入�
       assert.ok(body.includes(`href="${src}" target="_blank" rel="noopener noreferrer"`))
       assert.ok(body.includes(`src="${src}" alt="${escapeHTML(shot.alt)}" width="${shot.width || 1309}" height="${shot.height || 707}" loading="lazy"`))
       const bytes = await readFile(new URL(src, root))
-      assert.deepEqual([...bytes.subarray(0, 3)], [0xff, 0xd8, 0xff], `${src} must be a real JPEG capture`)
-      assert.ok(bytes.length > 10000)
+      assert.ok(bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])) || bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])), `${src} must be JPEG or PNG`)
+      assert.ok(bytes.length > 1000)
     }
   }
   const provenance = await readFile(new URL('../examples/manual-demo/README.md', import.meta.url), 'utf8')
@@ -153,9 +155,9 @@ test('截图有有效本地资源、替代文字、说明、来源与放大入�
   assert.match(provenance, /独立 DSH Profile/)
 })
 
-test('全部 100 个功能主题均有明确配图，正常介绍不再引用报错截图', () => {
+test('功能主题明确配置配图或保持纯文字，不强制旧截图', () => {
   for (const { id } of readTopics(inventory)) {
-    assert.ok(pageScreenshots[id]?.length > 0, `${id} 缺少截图`)
+    assert.ok(Array.isArray(pageScreenshots[id]), `${id} 缺少截图配置`)
     for (const key of pageScreenshots[id]) assert.ok(screenshots[key], `${id}: ${key}`)
   }
   assert.equal(Object.keys(pageScreenshots).filter(id => /^[a-n]\d{2}$/.test(id)).length, 100)
@@ -217,11 +219,11 @@ test('搜索匹配中文正文、标题、大小写及多个关键词，处理�
 })
 
 test('生图与画像是高级功能，后台设计与搜索分别有独立页面', () => {
-  for (const id of ['e01', 'e04', 'd10', 'm02', 'f01', 'h07']) assert.equal(pages.find(p => p.id === id).group, 'advanced')
+  for (const id of ['e01', 'e04', 'd10', 'm02', 'f01', 'h07', 'h08', 'm04']) assert.equal(pages.find(p => p.id === id).group, 'advanced')
   assert.match(pages.find(p => p.id === 'e04').body, /默认关闭/)
-  assert.match(pages.find(p => p.id === 'e04').body, /不会改变已有游戏/)
-  assert.match(pages.find(p => p.id === 'd10').body, /没有独立玩家按钮/)
-  assert.match(pages.find(p => p.id === 'm02').body, /改设置不改变旧局/)
+  assert.match(pages.find(p => p.id === 'e04').body, /不会悄悄改变正在玩的游戏/)
+  assert.match(pages.find(p => p.id === 'd10').body, /点击“设计人物”/)
+  assert.match(pages.find(p => p.id === 'm02').body, /从后续请求生效/)
   assert.match(pages.find(p => p.id === 'f09').body, /重试保存/)
 })
 
@@ -238,4 +240,13 @@ test('Markdown 转换转义原始 HTML，只允许安全链接，生成语义表
   assert.match(result, /&lt;script&gt;/)
   assert.match(result, /href="#play"/)
   assert.match(result, /<th scope="col">名称/)
+})
+
+test('本局设置是游玩模式下独立可访问的带图页面', () => {
+  const page = pages.find(p => p.id === 'local-settings')
+  assert.equal(page.group, 'play')
+  assert.match(page.body, /玩家称呼/)
+  assert.match(page.body, /写作 Skill/)
+  assert.match(page.body, /local-settings-20260917.jpg/)
+  assert.match(html, /href="#local-settings"[^>]*>本局设置<\/a>/)
 })

@@ -10,6 +10,7 @@ function render(kind, enabled, busy = false, marker = false) {
   const calls = []
   const value = { name: '测试条目', content: '内容', role: 'system', entryKey: 'entry', regexKey: 'regex', enabled, marker, edit: { promptPath: '/prompts/0', enabledPaths: ['/enabled'] } }
   const sandbox = {
+    presetDropHandlers: () => ({}), preset: {}, groupPresetEntriesByPhase: () => ({ front: marker ? [] : [value], middle: [], back: [] }),
     h: (type, props, ...children) => ({ type, props, children }), busy,
     entryDraft: x => x, entryValue: x => x, regexDraft: x => x, regexValue: x => x,
     togglePresetEntry: x => calls.push(['entry', x]), togglePresetRegex: x => calls.push(['regex', x]),
@@ -38,7 +39,7 @@ for (const kind of ['entry', 'regex']) {
 }
 test('预设摘要不显示角色前缀，编辑区保留角色，系统占位仍只读', () => {
   const { row } = render('entry', true)
-  assert.equal(row.children[0].children.length, 2)
+  assert.equal(row.children[0].children.length, 3)
   assert.ok(!JSON.stringify(row.children[0]).includes('dsh-tavern-prompt-role'))
   assert.ok(JSON.stringify(row.children[1]).includes('角色'))
   const readOnly = render('entry', true, false, true).row.children[0].children.at(-1)

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { applyTavernRegexText } from './tavern-regex-display.js'
 import { marked } from 'marked'
 
@@ -113,6 +114,25 @@ function splitHtmlBoundaries(source, editing = false) {
     if (token[2]) continue // Inline code is prose, never executable HTML.
     const tag = (token[1] || '').toLowerCase()
     const closing = /^<\//.test(token[0])
+    // Variable protocols contain runtime data, not narrative prose. Keep the
+    // complete block in editable/source history, but omit it from display.
+    // Author HTML/script interiors and Markdown code examples stay opaque.
+    if (!editing && start < 0 && ['updatevariable', 'initvar'].includes(tag)) {
+      append('text', source.slice(cursor, token.index))
+      if (!closing && !/\/\s*>$/.test(token[0])) {
+        const boundary = new RegExp('<\\/?' + tag + '\\b[^>]*>', 'gi')
+        boundary.lastIndex = tokens.lastIndex
+        let depth = 1, next
+        while (depth && (next = boundary.exec(source))) {
+          if (/^<\//.test(next[0])) depth--
+          else if (!/\/\s*>$/.test(next[0])) depth++
+        }
+        tokens.lastIndex = depth ? source.length : boundary.lastIndex
+      }
+      append('marker', source.slice(token.index, tokens.lastIndex))
+      cursor = tokens.lastIndex
+      continue
+    }
     if (!editing && start < 0 && /^<!--/.test(token[0])) {
       append('text', source.slice(cursor, token.index))
       append('marker', token[0])
@@ -290,45 +310,98 @@ function isNativeMarkdownProjection(parts, sessionText) {
   return Array.isArray(parts) && parts.length === 1 && parts[0]?.kind === 'markdown' && str(parts[0].text) === str(sessionText)
 }
 
-/** Rebuild per-turn display projections from authoritative reply sources. */
-export function projectReplyHistory(messages, options = {}) {
-  const projections = []
-  let inferredTurn = 1
-  let latestSourceBacked = false
-
-  for (const message of Array.isArray(messages) ? messages : []) {
-    if (message === null || typeof message !== 'object') continue
-    if (message.role === 'user') {
-      inferredTurn += 1
-      continue
+/** Bound retained projection data as well as entry count; oversized replies bypass caching. */
+export function createReplyHistoryProjector({ maxCacheBytes = 16 * 1024 * 1024, maxCacheEntries = 2048 } = {}) {
+  const cache = new Map()
+  let bytes = 0, hits = 0, misses = 0, copies = 0
+  function digest(value) { return createHash('sha256').update(value).digest('hex') }
+  function projectCached(sourceText, projectionText, options, signature) {
+    const key = createHash('sha256').update(signature).update(String(sourceText.length) + ':')
+      .update(sourceText).update(String(projectionText.length) + ':').update(projectionText).digest('hex')
+    let item = cache.get(key)
+    if (item) {
+      hits++
+      cache.delete(key)
+      cache.set(key, item)
+    } else {
+      misses++
+      const projected = projectReplyLayers(sourceText, Object.assign({}, options, { projectionText }))
+      const value = { displayText: projected.displayText, displayMode: projected.displayMode,
+        displayParts: projected.displayParts, warnings: projected.warnings }
+      // This is a conservative payload estimate, not a measurement of V8 heap usage.
+      const size = value.displayText.length * 2 > maxCacheBytes ? Infinity : JSON.stringify(value).length * 2 + 256
+      if (size > maxCacheBytes || maxCacheEntries <= 0) return value
+      while (cache.size && (bytes + size > maxCacheBytes || cache.size >= maxCacheEntries)) {
+        const oldest = cache.keys().next().value
+        bytes -= cache.get(oldest).size
+        cache.delete(oldest)
+      }
+      item = { value, size }
+      cache.set(key, item)
+      bytes += size
     }
-    if (message.role !== 'assistant') continue
-
-    const turn = Math.max(0, Number(message.turn) || (message.greeting === true ? 1 : inferredTurn))
-    if (turn === 0) continue
-    const hasSource = Object.prototype.hasOwnProperty.call(message, 'sourceText')
-    const sourceText = hasSource ? str(message.sourceText) : str(message.text)
-    const projectionText = Object.prototype.hasOwnProperty.call(message, 'projectionText')
-      ? str(message.projectionText)
-      : sourceText
-    const projected = projectReplyLayers(sourceText, Object.assign({}, options, { projectionText }))
-    const sessionText = str(message.text)
-
-    if (message.bodyEdit || !isNativeMarkdownProjection(projected.displayParts, sessionText) || (Array.isArray(message.swipes) && message.swipes.length > 1)) {
-      projections.push({
-        version: 2,
-        turn,
-        text: projected.displayText,
-        mode: projected.displayMode,
-        parts: projected.displayParts,
-        warnings: projected.warnings
-      })
-    }
-    latestSourceBacked = hasSource
+    return item.value
   }
+  function signatureOf(options) {
+    return digest(JSON.stringify({ regexScripts: options.regexScripts || [],
+      charName: options.charName, userName: options.macroState?.userName,
+      placement: options.placement, isEdit: options.isEdit, depth: options.depth }))
+  }
+  function projectHistory(messages, options = {}, signature = signatureOf(options)) {
+    const projections = []
+    let inferredTurn = 1
+    let latestSourceBacked = false
 
-  return { projections, presentation: null, latestSourceBacked }
+    for (const message of Array.isArray(messages) ? messages : []) {
+      if (message === null || typeof message !== 'object') continue
+      if (message.role === 'user') {
+        inferredTurn += 1
+        continue
+      }
+      if (message.role !== 'assistant') continue
+
+      const turn = Math.max(0, Number(message.turn) || (message.greeting === true ? 1 : inferredTurn))
+      if (turn === 0) continue
+      const hasSource = Object.prototype.hasOwnProperty.call(message, 'sourceText')
+      const sourceText = hasSource ? str(message.sourceText) : str(message.text)
+      const projectionText = Object.prototype.hasOwnProperty.call(message, 'projectionText')
+        ? str(message.projectionText)
+        : sourceText
+
+      const templateDisplay = message.tavernPluginData?.template_display
+      if (templateDisplay && templateDisplay.source === sourceText && templateDisplay.swipe === (message.swipeId || 0)) {
+        projections.push({ version: 2, turn, text: templateDisplay.html, mode: 'html', parts: Array.isArray(templateDisplay.parts) ? structuredClone(templateDisplay.parts) : [{ kind: 'html', content: templateDisplay.html }], warnings: [] })
+        latestSourceBacked = hasSource
+        continue
+      }
+      const projected = projectCached(sourceText, projectionText, options, signature)
+      const sessionText = str(message.text)
+      if (message.bodyEdit || !isNativeMarkdownProjection(projected.displayParts, sessionText) || (Array.isArray(message.swipes) && message.swipes.length > 1)) {
+        // Copy only emitted projections; callers must never mutate cached parts.
+        copies++
+        projections.push({
+          version: 2,
+          turn,
+          text: projected.displayText,
+          mode: projected.displayMode,
+          parts: structuredClone(projected.displayParts),
+          warnings: [...projected.warnings]
+        })
+      }
+      latestSourceBacked = hasSource
+    }
+
+    return { projections, presentation: null, latestSourceBacked }
+  }
+  projectHistory.prepare = options => {
+    const snapshot = structuredClone(options), signature = signatureOf(snapshot)
+    return messages => projectHistory(messages, snapshot, signature)
+  }
+  projectHistory.cacheStats = () => ({ entries: cache.size, estimatedBytes: bytes, hits, misses, copies })
+  return projectHistory
 }
+
+export const projectReplyHistory = createReplyHistoryProjector()
 
 /**
  * Transitional old-shape adapter. New callers should use projectReplyLayers().

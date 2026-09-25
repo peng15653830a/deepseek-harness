@@ -3,6 +3,10 @@ import { redactDiagnostic } from './mvu-diagnostics.js'
 
 const maxBytes = 2 * 1024 * 1024
 const maxRecordBytes = 128 * 1024
+const recordKey = record => createHash('sha256').update(JSON.stringify([record.requestId, record.targetKey])).digest('hex')
+const recordPath = (chatId, key) => pathFor(chatId).slice(0, -5) + '/' + key + '.json'
+const recordSize = record => Buffer.byteLength(JSON.stringify(record))
+const indexEntry = record => ({ key: recordKey(record), requestId: record.requestId, targetKey: record.targetKey, bytes: recordSize(record) })
 const pathFor = chatId => 'diagnostics/scene-' + createHash('sha256').update(String(chatId)).digest('hex') + '.json'
 
 export function redactSceneDiagnostic(value, secrets = [], depth = 0) {
@@ -49,30 +53,75 @@ export function createSceneImageDiagnostics(store, { onDiagnostic } = {}) {
         try { await onDiagnostic?.(summary) }
         catch { /* Logging failure must not change paid job state or persistence. */ }
       }
-      await store.updateJson(pathFor(chatId), previous => {
+      const index = await store.updateJson(pathFor(chatId), async previous => {
         const records = previous?.records || []
-        const old = records.find(item => item.requestId === clean.requestId && item.targetKey === clean.targetKey)
-        const events = [...(old?.events || [])]
-        const last = events.at(-1)
-        if (!last || last.stage !== clean.stage || last.status !== clean.status || clean.event) events.push({ at, stage: clean.stage, status: clean.status, ...(clean.event ? { event: clean.event } : {}) })
-        const stageDurationsMs = {}
-        for (let index = 0; index < events.length; index++) {
-          const event = events[index]
-          if (event.status !== 'running') continue
-          stageDurationsMs[event.stage] = (stageDurationsMs[event.stage] || 0) + Math.max(0, (events[index + 1]?.at || at) - event.at)
+        // Publish the new index only after every referenced body has been saved.
+        // A failed migration leaves the legacy file authoritative and readable.
+        const entries = previous?.version === 2 ? records : []
+        if (previous?.version !== 2) {
+          for (const record of records) {
+            const entry = indexEntry(record)
+            await store.updateJson(recordPath(chatId, entry.key), () => record)
+            entries.push(entry)
+          }
         }
-        const record = bounded({ ...old, ...clean, updatedAt: at, events: events.slice(-100),
-          stageDurationsMs,
-          droppedEvents: (old?.droppedEvents || 0) + Math.max(0, events.length - 100),
-          ...(clean.status !== 'running' ? { durationMs: Math.max(0, at - (clean.createdAt || old?.createdAt || at)) } : {}) })
-        const next = records.filter(item => item !== old).concat(record)
+        const key = recordKey(clean)
+        const entry = entries.find(item => item.key === key)
+        const record = await store.updateJson(recordPath(chatId, key), stored => {
+          const old = entry ? stored : undefined
+          const events = [...(old?.events || [])]
+          const last = events.at(-1)
+          if (!last || last.stage !== clean.stage || last.status !== clean.status || clean.event) events.push({ at, stage: clean.stage, status: clean.status, ...(clean.event ? { event: clean.event } : {}) })
+          const stageDurationsMs = {}
+          for (let index = 0; index < events.length; index++) {
+            const event = events[index]
+            if (event.status !== 'running') continue
+            stageDurationsMs[event.stage] = (stageDurationsMs[event.stage] || 0) + Math.max(0, (events[index + 1]?.at || at) - event.at)
+          }
+          return bounded({ ...old, ...clean, updatedAt: at, events: events.slice(-100),
+            stageDurationsMs,
+            droppedEvents: (old?.droppedEvents || 0) + Math.max(0, events.length - 100),
+            ...(clean.status !== 'running' ? { durationMs: Math.max(0, at - (clean.createdAt || old?.createdAt || at)) } : {}) })
+        })
+        const next = entries.filter(item => item.key !== key).concat(indexEntry(record))
         let dropped = previous?.dropped || 0
-        while (next.length > 100 || Buffer.byteLength(JSON.stringify(next)) > maxBytes) { next.shift(); dropped++ }
-        return { version: 1, chatId, dropped, records: next }
+        let bytes = 2 + next.reduce((sum, item) => sum + item.bytes + 1, 0)
+        const garbage = new Set(previous?.garbage || [])
+        while (next.length > 100 || bytes > maxBytes) {
+          const removed = next.shift()
+          bytes -= removed.bytes + 1
+          garbage.add(removed.key)
+          dropped++
+        }
+        for (const item of next) garbage.delete(item.key)
+        return { version: 2, chatId, dropped, records: next, garbage: [...garbage] }
       })
+      if (index.garbage.length && typeof store.remove === 'function') {
+        // Reacquire the index lock: another writer may have revived an evicted
+        // identity after publication. Never delete a currently indexed body.
+        await store.updateJson(pathFor(chatId), async current => {
+          if (current?.version !== 2) return current
+          const live = new Set(current.records.map(item => item.key))
+          const remaining = []
+          for (const key of current.garbage || []) {
+            if (live.has(key)) continue
+            try { await store.remove(recordPath(chatId, key)) } catch { remaining.push(key) }
+          }
+          return { ...current, garbage: remaining }
+        })
+      }
     },
     async read(chatId) {
-      return await store.readJson(pathFor(chatId)) || { version: 1, chatId, dropped: 0, records: [] }
+      const index = await store.readJson(pathFor(chatId))
+      if (!index) return { version: 1, chatId, dropped: 0, records: [] }
+      if (index.version !== 2) return index
+      const records = []
+      for (const entry of index.records) {
+        const record = await store.readJson(recordPath(chatId, entry.key))
+        records.push(record || { requestId: entry.requestId, targetKey: entry.targetKey,
+          unavailable: true, error: '诊断详情缺失或已被容量清理。' })
+      }
+      return { version: 1, chatId, dropped: index.dropped, records }
     }
   }
 }

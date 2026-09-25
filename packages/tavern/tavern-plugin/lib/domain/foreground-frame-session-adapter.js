@@ -1,4 +1,5 @@
 import { foregroundFrameText } from './agent-input-frame.js'
+import { worldbookSnapshot } from './worldbook-snapshot.js'
 
 function str(value) {
   return typeof value === 'string' ? value : (value === undefined || value === null ? '' : String(value))
@@ -21,9 +22,17 @@ export function createForegroundFrameSessionAdapter(options = {}) {
     if (messages.some(function (message) { return frameIdOf(message) === frame.frameId })) {
       return { messages, receipt: { appended: false, reason: 'duplicate', frameId: frame.frameId } }
     }
-    const contributions = frame.contributions
+    const snapshot = worldbookSnapshot(input.session, frame.contributions
+      .filter(item => item.slot === 'activeWorldbook').map(item => item.text).join('\n\n'), input.historyMessages || messages)
+    const contributions = frame.contributions.filter(item => item.slot !== 'activeWorldbook')
+    const snapshots = snapshot ? [{
+      id: makeId() + ':worldbook', role: 'user',
+      content: [{ type: 'text', text: snapshot.rendered }],
+      source: { kind: 'plugin', plugin: 'dsh-tavern', form: 'worldbook-snapshot',
+        worldbookSnapshot: snapshot, trace: { frameId: frame.frameId, turn: frame.turn, operationId: frame.operationId } }
+    }] : []
     const text = foregroundFrameText({ contributions })
-    if (text === '') return { messages, receipt: { appended: false, reason: 'empty', frameId: frame.frameId } }
+    if (text === '') return { messages: messages.concat(snapshots), receipt: { appended: snapshots.length > 0, reason: snapshots.length ? 'appended' : 'empty', frameId: frame.frameId } }
     const sections = contributions.map(function (item, index) {
       return {
         name: 'tavern:foreground:' + str(item.slot) + ':' + (index + 1),
@@ -32,7 +41,7 @@ export function createForegroundFrameSessionAdapter(options = {}) {
       }
     })
     return {
-      messages: messages.concat([{
+      messages: messages.concat(snapshots, [{
         id: makeId(),
         role: 'user',
         content: [{ type: 'text', text }],

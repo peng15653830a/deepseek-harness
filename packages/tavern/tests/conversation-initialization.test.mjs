@@ -157,14 +157,16 @@ test('会话种子任一消息写入中断后可恢复，且不重放已经追�
   }
 })
 
-test('新游戏固化创建时的联网搜索设置，之后不随设置变化', async () => {
+test('新游戏功能默认关闭，不继承旧全局开关', async () => {
   const h = initializationFixture()
   h.state.settings.webSearchEnabled = true
   const created = await h.make().start(h.input)
-  assert.equal(created.webSearchEnabled, true)
+  assert.equal(created.webSearchEnabled, false)
+  assert.equal(created.sceneImagesEnabled, false)
+  assert.equal(created.conversationFeaturesVersion, 1)
 
   h.state.settings.webSearchEnabled = false
-  assert.equal((await h.make().start(h.input)).webSearchEnabled, true)
+  assert.equal((await h.make().start(h.input)).webSearchEnabled, false)
 
   const fresh = initializationFixture()
   assert.equal((await fresh.make().start(fresh.input)).webSearchEnabled, false)
@@ -172,7 +174,7 @@ test('新游戏固化创建时的联网搜索设置，之后不随设置变化',
   assert.equal((await fresh.make().start({ ...fresh.input, cardPath: '', mode: 'card' })).webSearchEnabled, false)
 })
 
-test('新游戏默认动态跟随前台，显式后台配置才固化；重入不改写选择', async () => {
+test('新游戏后台默认跟随前台且结算开关独立，不继承旧全局模型', async () => {
   const following = initializationFixture()
   const first = await following.make().start(following.input)
   assert.equal(first.backgroundModelSelection, null)
@@ -180,8 +182,13 @@ test('新游戏默认动态跟随前台，显式后台配置才固化；重入�
   assert.equal((await following.make().start(following.input)).backgroundModelSelection, null)
 
   const fixed = initializationFixture()
-  fixed.state.settings.backgroundModel = { provider: 'siliconflow', model: 'deepseek-v4' }
-  assert.deepEqual((await fixed.make().start(fixed.input)).backgroundModelSelection, { provider: 'siliconflow', model: 'deepseek-v4' })
+  fixed.state.settings.backgroundModel = { provider: 'siliconflow', model: 'deepseek-v4', reasoningEffort: 'high' }
+  const created = await fixed.make().start(fixed.input)
+  assert.equal(created.backgroundModelSelection, null)
+  assert.equal(created.backgroundConfigVersion, 1)
+  assert.deepEqual(created.backgroundTasks, { variables: true, posture: true, characterDesign: false, ledger: false })
+  fixed.state.settings.backgroundModel.reasoningEffort = 'low'
+  assert.equal((await fixed.make().start(fixed.input)).backgroundModelSelection, null)
   assert.equal((await fixed.make().start({ ...fixed.input, cardPath: '', mode: 'card' })).backgroundModelSelection, null)
 })
 
@@ -417,4 +424,81 @@ test('prepared MVU initialization preserves every opening and never marks partia
     selected.stat_data.hp = 0
     assert.equal(chat.messages[0].variables[1].stat_data.hp, 20)
   }
+})
+
+
+test('new games and profile workbenches bind the selected profile without changing existing games', async () => {
+  const profile = await profileFixture()
+  const h = initializationFixture({ userPreferenceProfile: profile })
+  await profile.setDefaultEnabled(true)
+  const first = await h.make().start({ ...h.input, sessionId: 'first-profile' })
+  const created = await profile.manage({ action: 'create', name: '冒险' })
+  const draft = await profile.saveDraft({ summary: '冒险', injectionText: '快节奏冒险' })
+  await profile.confirm({ draftRevision: draft.draft.revision, confirmation: '确认保存用户画像' })
+  await profile.setDefaultEnabled(true)
+  const second = await h.make().start({ ...h.input, sessionId: 'second-profile' })
+  const workbench = await h.make().start({ ...h.input, sessionId: 'profile-workbench', mode: 'card', cardPath: '' })
+  assert.equal(first.userProfileId, 'default')
+  assert.match(first.userProfileContextSnapshot, /慢热/)
+  assert.equal(second.userProfileId, created.profileId)
+  assert.match(second.userProfileContextSnapshot, /快节奏冒险/)
+  assert.equal(workbench.userProfileId, created.profileId)
+  assert.equal(workbench.userProfileEnabled, false)
+})
+
+test('new games use the configured default even while browsing an unfinished profile', async () => {
+  const profile = await profileFixture()
+  await profile.manage({ action: 'default', profileId: 'default' })
+  const browsing = await profile.manage({ action: 'create', name: '尚未完成' })
+  const h = initializationFixture({ userPreferenceProfile: profile })
+  const game = await h.make().start({ ...h.input, sessionId: 'separate-default' })
+  assert.equal(game.userProfileId, 'default')
+  assert.equal(game.userProfileEnabled, true)
+  assert.match(game.userProfileContextSnapshot, /慢热/)
+  const workbench = await h.make().start({ ...h.input, sessionId: 'separate-library', mode: 'card', cardPath: '' })
+  assert.equal(workbench.userProfileId, browsing.profileId)
+  await profile.manage({ action: 'default', profileId: '' })
+  assert.equal((await h.make().start({ ...h.input, sessionId: 'without-default' })).userProfileEnabled, false)
+})
+
+
+test('新局采用全局默认模型，重入和卡片工作台不覆盖本局选择', async () => {
+  const h = initializationFixture()
+  const foreground = { provider: 'p', model: 'story', reasoningEffort: 'low' }
+  const background = { provider: 'p', model: 'fast', reasoningEffort: 'high' }
+  h.state.settings.defaultForegroundModel = foreground
+  h.state.settings.defaultBackgroundModel = background
+  const first = await h.make().start(h.input)
+  assert.deepEqual(h.session().selectedModel, foreground)
+  assert.deepEqual(first.backgroundModelSelection, background)
+  h.session().selectedModel = { provider: 'p', model: 'manual' }
+  h.state.settings.defaultForegroundModel = { provider: 'p', model: 'new' }
+  h.state.settings.defaultBackgroundModel = null
+  const existing = await h.make().start(h.input)
+  assert.equal(h.session().selectedModel.model, 'manual')
+  assert.deepEqual(existing.backgroundModelSelection, background)
+  const next = await h.make().start({ ...h.input, sessionId: 'next-default' })
+  assert.equal(h.session('next-default').selectedModel.model, 'new')
+  assert.equal(next.backgroundModelSelection, null)
+  const workbench = await h.make().start({ ...h.input, sessionId: 'workbench-default', mode: 'card', cardPath: '' })
+  assert.equal(workbench.backgroundModelSelection, null)
+  assert.equal(h.session('workbench-default').selectedModel, undefined)
+  assert.equal(h.trace.filter(x => x === 'model.select').length, 2)
+})
+
+
+test('新游戏复制全局 Skill 开关，本局调整和后续全局修改互不覆盖', async () => {
+  const h = initializationFixture()
+  h.state.settings.defaultDisabledWritingSkills = ['writing-a']
+  const first = await h.make().start(h.input)
+  assert.deepEqual(first.disabledWritingSkills, ['writing-a'])
+  h.state.settings.defaultDisabledWritingSkills.push('writing-b')
+  assert.deepEqual((await h.make().start(h.input)).disabledWritingSkills, ['writing-a'])
+  const local = h.saved.get(first.id)
+  local.disabledWritingSkills = []
+  assert.deepEqual((await h.make().start(h.input)).disabledWritingSkills, [])
+  const next = await h.make().start({ ...h.input, sessionId: 'next-skills' })
+  assert.deepEqual(next.disabledWritingSkills, ['writing-a', 'writing-b'])
+  const card = await h.make().start({ ...h.input, sessionId: 'card-skills', mode: 'card', cardPath: '' })
+  assert.deepEqual(card.disabledWritingSkills, [])
 })
