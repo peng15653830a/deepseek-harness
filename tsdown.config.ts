@@ -29,8 +29,8 @@ export default defineConfig(({ env }) => {
   const client = isBuildFaceClient(env?.DSH_BUILD_FACE)
   return {
     workspace: client
-      ? ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', 'apps/cli']
-      : ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
+      ? ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', '!packages/tavern/config', '!packages/tavern/references', 'apps/cli']
+      : ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', '!packages/tavern/config', '!packages/tavern/references', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
     entry: client ? '' : ['lib/types/{index,invariant,startup}.js'],
     outDir: 'lib',
     format: ['esm'],
