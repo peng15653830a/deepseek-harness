@@ -36,7 +36,17 @@ export async function prepareExpandedPatch(runtime, options = {}) {
       const url = urls.get(specifier) ?? (/^(node:|file:|data:)/.test(specifier) ? specifier : pathToFileURL(localRequire.resolve(specifier)).href)
       return 'from ' + JSON.stringify(url)
     })
+    // A module compiled into a data URL resolves nothing on its own: dynamic
+    // imports of bare specifiers need absolute URLs too (win32 JSONL durability
+    // loads koffi this way, which the Windows path alone exercises).
+    modified = modified.replace(/import\("([^"]+)"\)/g, (_, specifier) => {
+      const url = urls.get(specifier) ?? (/^(node:|file:|data:)/.test(specifier) ? specifier : pathToFileURL(localRequire.resolve(specifier)).href)
+      return 'import(' + JSON.stringify(url) + ')'
+    })
     modified = modified.replaceAll('import.meta.url', JSON.stringify(pathToFileURL(path).href))
+    // The compiled copy is a data URL with no map beside it; a sourceMappingURL
+    // there is unresolvable and the ESM loader rejects the whole module.
+    modified = modified.replace(/^\/\/# sourceMappingURL=.*$/gm, '')
     const url = 'data:text/javascript;base64,' + Buffer.from(modified).toString('base64')
     urls.set(name, url)
     return import(url)
@@ -171,7 +181,7 @@ export const SESSION_PATCH_VERSION = '0.1.5-rc.2'
 const INSTALLED = Symbol.for('dsh-tavern.host-session-patch.v1')
 const PINNED_SHA256 = Object.freeze({
   '@deepseek-ai/dsh-session/surface': 'aad7aaabe6cd9b39ae4cc3b50a2873c9b5d73b69d929051f31b18ecc13647c72',
-  '@deepseek-ai/dsh-session': '05e94f57d96e7979670a5b51024c8591572eb0051ce793613dbdec35cf2c47bf',
+  '@deepseek-ai/dsh-session': '54575499986bbf0583020d863ecbcb43fd71e5e02d41f6a70c8919e83a0f9050',
   '@deepseek-ai/dsh-session-persistence': '0dc2a1634e4b6ebb558aac214009da3dc00f54f315762a56a1841d12baf770d4',
   '@deepseek-ai/dsh-session-format-v2-to-v3': '2d35e1e0ed497af569d5735fc590187de1568489cfe60d070b5f61330cd5a338',
   '@deepseek-ai/dsh-session-format-catalog': 'bf4bde9e6563d7793f820c4a1b3141f6527283dd6c58f16bf43a67bc557cc48c',
@@ -181,7 +191,18 @@ const PINNED_SHA256 = Object.freeze({
 })
 
 function hostRequireFrom(anchor) {
-  return createRequire(createRequire(anchor).resolve('@deepseek-ai/dsh-tools'))
+  const fromAnchor = createRequire(anchor)
+  const hostAnchored = (() => {
+    try { return createRequire(fromAnchor.resolve('@deepseek-ai/dsh-tools')) } catch { return undefined }
+  })()
+  // A packaged host keeps every DSH package in one node_modules, so anchoring on
+  // dsh-tools reaches them all. A workspace checkout links each package's own
+  // dependencies instead, so that scope may miss the session packages and the
+  // anchor itself (the plugin) wins.
+  if (hostAnchored !== undefined) {
+    try { hostAnchored.resolve('@deepseek-ai/dsh-session-persistence'); return hostAnchored } catch { /* fall through */ }
+  }
+  return fromAnchor
 }
 
 // The plugin file lives in this repo. The running host packages live next to
@@ -207,8 +228,10 @@ async function defaultHostRequire(persistence) {
 function runtimeRoot(sessionFile) {
   const parts = sessionFile.split(sep)
   const index = parts.lastIndexOf('node_modules')
-  if (index <= 0) throw new Error('无法从宿主包路径定位安装根目录')
-  return parts.slice(0, index).join(sep)
+  if (index > 0) return parts.slice(0, index).join(sep)
+  // A workspace checkout links the host packages without a node_modules segment,
+  // so the plugin directory — which declares them — is the resolution root.
+  return fileURLToPath(new URL('../../', import.meta.url))
 }
 
 function createHandle(fields) {
