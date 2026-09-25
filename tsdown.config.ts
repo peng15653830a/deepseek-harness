@@ -18,13 +18,19 @@ function isBuildFaceClient(value: unknown): boolean {
  * has no entry to build for it. `packages/tavern/image-gen` is excluded for
  * the same reason as a mixed-face package: it builds through its own package
  * scripts once the client face has produced the sibling type declarations.
+ * `packages/tavern/presets` and `packages/tavern/tests` are the ported
+ * subtree's presets and test fixtures: they ship no package.json, so the
+ * `packages/<group>/<package>` glob would otherwise adopt them as members and
+ * apply the default entry, which resolves no file inside a directory holding
+ * no sources. The same holds for `packages/tavern/bin`, the subtree's
+ * launcher scripts restored from the Tavern upstream.
  */
 export default defineConfig(({ env }) => {
   const client = isBuildFaceClient(env?.DSH_BUILD_FACE)
   return {
     workspace: client
-      ? ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', 'apps/cli']
-      : ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
+      ? ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', 'apps/cli']
+      : ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
     entry: client ? '' : ['lib/types/{index,invariant,startup}.js'],
     outDir: 'lib',
     format: ['esm'],

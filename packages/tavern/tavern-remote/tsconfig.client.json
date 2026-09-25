@@ -12,5 +12,13 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/client.ts", "src/shared.ts"]
+  "include": ["src/client.ts", "src/shared.ts"],
+  "references": [
+    {
+      "path": "../../../vendor/cordis"
+    },
+    {
+      "path": "../../api/gateway/tsconfig.client.json"
+    }
+  ]
 }

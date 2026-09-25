@@ -37,7 +37,9 @@ pre-commit:
       run: node_modules/.bin/tsx scripts/gen-third-party-notices.ts && git add THIRD_PARTY_NOTICES.md
 
     - name: whitespace (staged)
-      run: git diff --cached --check
+      # The Tavern subtree vendors upstream bytes it verifies at runtime, so
+      # their trailing whitespace cannot be normalized here.
+      run: git diff --cached --check -- :!packages/tavern
 
     - name: vendor manifest guard
       run: scripts/check-vendor-manifest.sh

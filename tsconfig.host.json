@@ -130,7 +130,12 @@
     "scripts/*.client.spec.ts",
     "scripts/client-bundle-css.spec.ts",
     "packages/typert/generator/tests/fixtures/**",
-    "scripts/client-bundle-purity.spec.ts"
+    "scripts/client-bundle-purity.spec.ts",
+    // image-gen is a mixed-face package that builds through its own package
+    // scripts after the Client face emits the sibling declarations (see
+    // tsdown.config.ts); it registers in neither aggregate, so its tests must
+    // not enter this program.
+    "packages/tavern/image-gen/tests/**"
   ],
   "references": [
     { "path": "./packages/client/ui-deliverables/tsconfig.host.json" },

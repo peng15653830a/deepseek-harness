@@ -12,5 +12,13 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/index.ts", "src/shared.ts", "src/typert-protocol.d.ts"]
+  "include": ["src/index.ts", "src/shared.ts"],
+  "references": [
+    {
+      "path": "../../../vendor/cordis"
+    },
+    {
+      "path": "../../typert/protocol"
+    }
+  ]
 }

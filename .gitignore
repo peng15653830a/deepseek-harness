@@ -2,6 +2,10 @@ CLAUDE.local.md
 .env
 node_modules/
 lib/
+# The Tavern plugin's runtime host is hand-owned plain JavaScript committed as
+# source, not build output: without these negations a fresh clone loses it.
+!packages/tavern/tavern-plugin/lib/
+!packages/tavern/tavern-plugin/lib/**
 *.tsbuildinfo
 pnpm-debug.log
 .pnpm-store/
