@@ -7989,7 +7989,14 @@ window.__ModuleLoader__.load({
 			if (sessionListRecoveryRef.current === null) {
 				sessionListRecoveryRef.current = createSessionListRecoveryModule({
 					summary: function (sessionId) { return props.sessions.list.getSnapshot().byId[sessionId]; },
-					binding: function (sessionId) { return props.sessions.binding(sessionId); },
+					binding: function (sessionId) {
+						const live = props.sessions.binding(sessionId);
+						if (live) return live;
+						// 0.2 的会话要等视图导航 retain 后才有 client binding；宿主列表里
+						// 已存在即视为就绪，后续 open 会补上 retain。
+						if (props.sessions.list.getSnapshot().byId[sessionId]) return { pending: true };
+						return undefined;
+					},
 					refresh: function () { return typeof props.sessions.refresh === "function" ? props.sessions.refresh() : Promise.resolve(); },
 					open: function (sessionId) { openConversation(sessionId); },
 					isUnknownSession: isUnknownSessionSelectError
