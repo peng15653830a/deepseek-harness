@@ -1,6 +1,7 @@
 import { replaceSessionSurface } from './session-surface-mutations.js'
 import { sessionEvents } from './session-events.js'
 import { clearRegenerationAttemptSurface, regenerationAttemptTurns, locateRegenerationSurface } from './rollback-surface.js'
+import { tavernSourceIs } from './message-source.js'
 
 /** Recover an uncommitted replacement from its durable pre-rollback revision. */
 export function createRegenerationRecovery({ chats, sessions, timeline, isActive }) {
@@ -29,7 +30,7 @@ export function createRegenerationRecovery({ chats, sessions, timeline, isActive
     const target = locateRegenerationSurface({ events, nodes: session.surface?.nodes || [], turn: assistant?.turn })
     if (!target) throw new Error('找不到原正文的原生消息，未修改当前对话')
     const attempt = events.find(event => event.seq > target.assistantSeq && event.type === 'user/message' &&
-      event.data?.source?.plugin === 'dsh-tavern-regen')
+      tavernSourceIs(event.data?.source, 'dsh-tavern-regen'))
     return attempt ? attempt.seq : events.length
   }
 

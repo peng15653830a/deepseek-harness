@@ -105,13 +105,21 @@ export async function prepareExpandedPatch(runtime, options = {}) {
     // tavern's system prompts and greeting/edit narrative messages sit outside
     // an open turn like they always did. The catalog clone compiled below
     // reroutes to this clone via the urls map.
-    await compile('@deepseek-ai/dsh-session-format-v3-to-v4', text => once(once(once(text,
+    // v4 also retired the 0.1 `source.kind 'plugin'` wrapper; tavern rows with
+    // it (written before this fix, or by a mixed-version install) must still
+    // load, so the reader-side refusals are relaxed and classification is left
+    // to tavern's own source helpers.
+    await compile('@deepseek-ai/dsh-session-format-v3-to-v4', text => once(once(once(once(once(text,
       '\t"workspace/changes"\n]);',
       '\t"workspace/changes",\n\t"dsh-tavern/required-session-patch-v1"\n]);'),
       'if (STEP_EVENT_TYPES.has(event.type)) this.requireStep(event, data);',
       'if (event.type === "developer/message" || event.type === "assistant/attempt") this.requireStep(event, data);'),
       '\t\t\treturn;\n\t\t}\n\t\tthis.requireStep(event, data);',
-      '\t\t\treturn;\n\t\t}\n\t\tif (event.type !== "assistant/message") this.requireStep(event, data);'))
+      '\t\t\treturn;\n\t\t}\n\t\tif (event.type !== "assistant/message") this.requireStep(event, data);'),
+      '|| value["kind"] === "plugin") throw new SessionFormatError("format v4 message requires a producer-owned source kind");',
+      ') throw new SessionFormatError("format v4 message requires a producer-owned source kind");'),
+      'if (isSessionFormatJsonObject(value) && value["kind"] === "plugin") source(message);',
+      'if (false) source(message);'))
     const cloneCatalog = await compile('@deepseek-ai/dsh-session-format-catalog')
     const catalog = cloneCatalog.sessionFormatCatalog
     const catalogWithChildren = cloneCatalog.createSessionFormatCatalogWithChildren

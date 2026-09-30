@@ -1,6 +1,7 @@
 import { replaceSessionSurface } from './session-surface-mutations.js'
 import { randomUUID } from 'node:crypto'
 import { appendSessionEvent, sessionEvents } from './session-events.js'
+import { tavernSourceIs } from './message-source.js'
 
 /** Retire request scaffolding only; story and append-only evidence stay intact. */
 export function retireForegroundFrames(session, { keepTurn } = {}) {
@@ -9,12 +10,12 @@ export function retireForegroundFrames(session, { keepTurn } = {}) {
   let count = 0
   for (const seq of [...(session.surface?.nodes || [])]) {
     const event = bySeq.get(seq), data = event?.data, source = data?.source
-    if (event?.type !== 'user/message' || source?.kind !== 'plugin' || source.plugin !== 'dsh-tavern' || source.form !== 'foreground-frame') continue
+    if (event?.type !== 'user/message' || !tavernSourceIs(source, 'dsh-tavern') || source.form !== 'foreground-frame') continue
     if (Number.isSafeInteger(keepTurn) && Number(source.trace?.turn) === keepTurn) continue
     if (!Array.isArray(data.content) || !data.content.length) continue
     replaceSessionSurface(session, 'user/message', {
       id: randomUUID(), role: 'user', content: [],
-      source: { kind: 'plugin', plugin: 'dsh-tavern', form: 'foreground-frame', ...(source.trace === undefined ? {} : { trace: source.trace }) }
+      source: { kind: 'dsh-tavern', plugin: 'dsh-tavern', form: 'foreground-frame', ...(source.trace === undefined ? {} : { trace: source.trace }) }
     }, { start: seq, end: seq, sourceEventSeqs: [seq] })
     count++
   }

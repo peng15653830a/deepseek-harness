@@ -62,8 +62,7 @@ export function presentWorkspaceInstructions(request) {
   const messages = request.messages.map(message => {
     const source = message?.source
     if (message?.role !== 'user' || !(
-      source?.kind === 'agent-instructions' ||
-      (source?.kind === 'plugin' && ['agent-instructions', '@deepseek-ai/dsh-agent-instructions'].includes(source.plugin))
+      source?.kind === 'agent-instructions' || source?.plugin === 'agent-instructions' || source?.plugin === '@deepseek-ai/dsh-agent-instructions'
     ) || !Array.isArray(message.content)) return message
     let messageChanged = false
     const content = message.content.map(block => {

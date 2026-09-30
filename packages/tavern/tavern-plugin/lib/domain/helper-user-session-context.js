@@ -12,7 +12,7 @@ export function appendHelperUserSessionContext(session, chat, targets) {
     if (existing.has(id)) continue
     session.append('user/message', {
       id, role: 'user', content: [{ type: 'text', text: String(message.sourceText || message.text || '') }],
-      source: { kind: 'plugin', plugin: 'dsh-tavern-helper', chatId: chat.id, messageId: target.messageId }
+      source: { kind: 'dsh-tavern-helper', plugin: 'dsh-tavern-helper', chatId: chat.id, messageId: target.messageId }
     }, { surfaceOp: 'append' })
     existing.add(id)
     appended += 1

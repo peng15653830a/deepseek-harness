@@ -13,7 +13,7 @@ export function ensureSessionSystemHead(session) {
   if (!(session?.header?.version >= 3) || session.surface.nodes.length > 0) return
   appendSessionEvent(session, 'system/message', { turn: 1, step: 1, message: {
     id: 'tavern-system-head:' + session.id, role: 'system', content: [],
-    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }
+    source: { kind: 'system-prompt', plugin: '@deepseek-ai/dsh-system-prompt' }
   } }, { surfaceOp: 'append' })
 }
 

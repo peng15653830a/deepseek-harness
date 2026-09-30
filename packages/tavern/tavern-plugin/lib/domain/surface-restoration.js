@@ -33,7 +33,7 @@ export function restoreSurface(session, targetNodes) {
       // transcript; replacements restore the exact model-visible messages.
       const placeholder = original.type === 'tool/result' ? structuredClone(original.data) : {
         turn: Number(original.data.turn) || 0, step: Number(original.data.step) || 1,
-        id: randomUUID(), role: 'user', content: [], source: { kind: 'plugin', plugin: 'dsh-tavern-surface-restore' }
+        id: randomUUID(), role: 'user', content: [], source: { kind: 'dsh-tavern-surface-restore', plugin: 'dsh-tavern-surface-restore' }
       }
       if (original.type === 'tool/result') placeholder.message.content[0].content = []
       const placeholderEvent = mutations.append(original.type === 'tool/result' ? original.type : 'user/message', placeholder, { surfaceOp: 'append' })

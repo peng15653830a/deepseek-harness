@@ -389,7 +389,7 @@ export function createBackgroundAgentTask(options) {
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text: taskText }],
-        source: { kind: 'plugin', plugin: 'dsh-tavern', ...(snapshot ? { worldbookSnapshot: snapshot } : {}), ...(scriptContext?.body ? {
+        source: { kind: 'dsh-tavern', plugin: 'dsh-tavern', ...(snapshot ? { worldbookSnapshot: snapshot } : {}), ...(scriptContext?.body ? {
           candidateScriptWindow: { version: 1, start: taskText.indexOf(scriptContext.body), length: scriptContext.body.length, digest: scriptContext.digest }
         } : {}), ...(filterContext ? {
           worldbookFilterPayload: { version: 1, start: taskText.indexOf(filterContext.payloadText), length: filterContext.payloadText.length }

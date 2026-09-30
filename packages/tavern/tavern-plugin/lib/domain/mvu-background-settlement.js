@@ -377,7 +377,7 @@ export function projectMvuBackgroundRequest(frame) {
       role: 'assistant',
       regexPlacement: 2,
       content: [{ type: 'text', text: str(output.storyText) }],
-      source: { kind: 'plugin', plugin: 'dsh-tavern', form: 'mvu-final-story' }
+      source: { kind: 'dsh-tavern', plugin: 'dsh-tavern', form: 'mvu-final-story' }
     }],
     turnContext: [
       '【当前变量快照】',

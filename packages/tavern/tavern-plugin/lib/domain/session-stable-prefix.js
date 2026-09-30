@@ -1,6 +1,7 @@
 import { replaceSessionSurface } from './session-surface-mutations.js'
 import { ensureSessionSystemHead, sessionEvents, appendSessionEvent } from './session-events.js'
 import { readFile } from 'node:fs/promises'
+import { tavernSourceIs } from './message-source.js'
 import path from 'node:path'
 import { createDurableFilePromotion } from '../durable-file-promotion.js'
 
@@ -35,8 +36,8 @@ export function createSessionStablePrefixStorage(directory) {
 
 function messageRecord(event) {
   const message = event && event.type === 'user/message' ? event.data : null
-  if (!str(message?.id).startsWith('tavern-session-prefix:') || message.role !== 'user' || message.source?.kind !== 'plugin' ||
-      message.source?.plugin !== 'dsh-tavern' || ![MESSAGE_FORM, LEGACY_MESSAGE_FORM].includes(message.source?.form) || !Array.isArray(message.content)) return null
+  if (!str(message?.id).startsWith('tavern-session-prefix:') || message.role !== 'user' || !tavernSourceIs(message.source, 'dsh-tavern') ||
+      ![MESSAGE_FORM, LEGACY_MESSAGE_FORM].includes(message.source?.form) || !Array.isArray(message.content)) return null
   const text = typeof message.source.fixedSystemText === 'string' ? message.source.fixedSystemText : message.content.filter(block => block?.type === 'text').map(block => str(block.text)).join('').trim()
   if (text === '') return null
   return { version: typeof message.source.fixedSystemText === 'string' ? 3 : 2, id: message.id, text, message, event }
@@ -91,7 +92,7 @@ function fixedContextMessage(session, text) {
     role: 'user',
     content: [],
     source: {
-      kind: 'plugin',
+      kind: 'dsh-tavern',
       plugin: 'dsh-tavern',
       form: MESSAGE_FORM,
       fixedSystemText: text,

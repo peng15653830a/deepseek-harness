@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { tavernSourceIs } from './message-source.js'
 
 const versionOf = text => createHash('sha256').update(text).digest('hex')
 const keyOf = (ref, version) => JSON.stringify([ref, version])
@@ -10,7 +11,7 @@ function visibleBodies(session) {
   if (typeof session?.deriveMessages !== 'function') return known
   for (const message of session.deriveMessages()) {
     const source = message.source, span = source?.worldbookFilterPayload
-    if (source?.kind !== 'plugin' || source.plugin !== 'dsh-tavern' || span?.version !== 1 || !message.id) continue
+    if (!tavernSourceIs(source, 'dsh-tavern') || span?.version !== 1 || !message.id) continue
     const content = message.content
     if (!Array.isArray(content) || content.length !== 1 || content[0]?.type !== 'text') continue
     const text = content[0].text

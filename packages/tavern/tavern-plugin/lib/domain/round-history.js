@@ -203,7 +203,7 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text: syntheticText }],
-        source: { kind: 'plugin', plugin: 'dsh-tavern-regen', regenerationId: operationId }
+        source: { kind: 'dsh-tavern-regen', plugin: 'dsh-tavern-regen', regenerationId: operationId }
       })
       await agent.whenIdle()
       syntheticTurn = agent.phase !== undefined && agent.phase !== null && Number.isFinite(Number(agent.phase.lastTurn)) ? Number(agent.phase.lastTurn) : (beforeLastTurn + 1)

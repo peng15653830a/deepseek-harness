@@ -1,12 +1,13 @@
 // Internal metadata-only events are persisted on the Session surface but are
 // not user utterances. Native compaction replays that surface independently of
 // the normal request projection, so omit them at this request boundary too.
+import { tavernSourceIs } from './message-source.js'
+
 export function projectCompactionRequest(request) {
   if (request?.purpose !== 'compaction' || !Array.isArray(request.messages)) return request
   const messages = request.messages.filter(message => !(message?.role === 'user' &&
     Array.isArray(message.content) && message.content.length === 0 &&
-    message.source?.kind === 'plugin' &&
-    ['dsh-tavern', 'dsh-tavern-failed-turn-cleanup'].includes(message.source.plugin)))
+    (tavernSourceIs(message.source, 'dsh-tavern') || tavernSourceIs(message.source, 'dsh-tavern-failed-turn-cleanup'))))
   return messages.length === request.messages.length ? request : { ...request, messages }
 }
 

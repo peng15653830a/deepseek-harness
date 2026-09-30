@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { tavernSourceIs } from './message-source.js'
 
 function str(value) {
   return typeof value === 'string' ? value : (value === undefined || value === null ? '' : String(value))
@@ -74,7 +75,7 @@ export function runtimePresetPhaseMessages(snapshot, phase, options = {}) {
       role: entry.role === 'user' || entry.role === 'assistant' ? entry.role : 'system',
       content: [{ type: 'text', text }],
       source: {
-        kind: 'plugin', plugin: 'dsh-tavern', form: 'snapshot',
+        kind: 'dsh-tavern', plugin: 'dsh-tavern', form: 'snapshot',
         sections: [{ name: 'tavern:runtime-preset-' + phase, text }]
       }
     }
@@ -83,7 +84,7 @@ export function runtimePresetPhaseMessages(snapshot, phase, options = {}) {
 
 export function isRuntimePresetBoundaryMessage(message) {
   const source = message && message.source
-  if (!source || source.kind !== 'plugin' || source.plugin !== 'dsh-tavern') return false
+  if (!tavernSourceIs(source, 'dsh-tavern')) return false
   return (Array.isArray(source.sections) ? source.sections : []).some(function (section) {
     return section && (section.name === 'tavern:runtime-preset-front' || section.name === 'tavern:runtime-preset-back')
   })
@@ -114,8 +115,7 @@ export function projectRuntimePresetRequest(request, snapshot, options = {}) {
   // V3 carries the assembled system prompt as a native message, sometimes
   // after the opening seed. Keep it at the system boundary when composing
   // presets; ordinary in-story system notes retain their existing treatment.
-  const isNativeSystem = message => message.role === 'system' && message.source?.kind === 'plugin' &&
-    message.source.plugin === '@deepseek-ai/dsh-system-prompt'
+  const isNativeSystem = message => message.role === 'system' && tavernSourceIs(message.source, '@deepseek-ai/dsh-system-prompt')
   const nativeSystems = ordinary.filter(isNativeSystem)
   const history = ordinary.filter(message => !isNativeSystem(message))
   const systemMessages = moveSystem ? [{
@@ -123,7 +123,7 @@ export function projectRuntimePresetRequest(request, snapshot, options = {}) {
     role: 'system',
     content: [{ type: 'text', text: systemText }],
     source: {
-      kind: 'plugin', plugin: 'dsh-tavern', form: 'snapshot',
+      kind: 'dsh-tavern', plugin: 'dsh-tavern', form: 'snapshot',
       sections: [{ name: 'tavern:dsh-system', text: systemText }]
     }
   }] : []

@@ -3,6 +3,7 @@ import { replaceSessionSurface } from './session-surface-mutations.js'
 import { restoredSurfaceSeqs } from './surface-restoration.js'
 import { sessionEvents, appendSessionEvent, surfaceReplacementRange } from './session-events.js'
 import { randomUUID } from 'node:crypto'
+import { tavernSourceIs } from './message-source.js'
 
 function object(value) {
   return value !== null && typeof value === 'object' ? value : null
@@ -23,17 +24,15 @@ function modelSourceOf(event) {
 
 function isForegroundContext(event) {
   const source = event?.type === 'user/message' && event.data?.source
-  return source?.kind === 'plugin' && source.plugin === 'dsh-tavern' &&
+  return tavernSourceIs(source, 'dsh-tavern') &&
     ['foreground-frame', 'worldbook-snapshot', 'snapshot'].includes(source.form)
 }
 
 function isRollbackUserTombstone(event) {
   const source = event && event.type === 'user/message' && event.data && event.data.source
-  return source && source.kind === 'plugin' && (
-    source.plugin === 'dsh-tavern-failed-turn-cleanup' ||
-    source.plugin === 'dsh-tavern-regeneration-abort' ||
-    source.plugin === 'dsh-tavern-context-window'
-  )
+  return tavernSourceIs(source, 'dsh-tavern-failed-turn-cleanup') ||
+    tavernSourceIs(source, 'dsh-tavern-regeneration-abort') ||
+    tavernSourceIs(source, 'dsh-tavern-context-window')
 }
 
 function isRollbackAssistantTombstone(event, events) {
@@ -71,7 +70,7 @@ export function abortedRegenerationTurns(input) {
   const seqs = []
   for (const event of events) {
     const source = event && event.type === 'user/message' && event.data && event.data.source
-    if (!source || source.kind !== 'plugin' || source.plugin !== 'dsh-tavern-regeneration-abort') continue
+    if (!tavernSourceIs(source, 'dsh-tavern-regeneration-abort')) continue
     if (Array.isArray(event.sourceEventSeqs)) seqs.push(...event.sourceEventSeqs)
   }
   return modelTurns(events, seqs)
@@ -170,7 +169,7 @@ export function pendingFailedSurfaceTurns({ events = [], nodes = [], suppressed 
     // marker and legacy context snapshots do not end the pending failure tail.
     if (isRollbackAssistantTombstone(event, events) || isForegroundContext(event)) continue
     if (!isRollbackUserTombstone(event)) break
-    if (event.data.source.plugin !== 'dsh-tavern-failed-turn-cleanup') continue
+    if (!tavernSourceIs(event.data.source, 'dsh-tavern-failed-turn-cleanup')) continue
     const sources = event.sourceEventSeqs || []
     const failed = new Set(modelTurns(events, sources))
     // A provider can fail before emitting any assistant message. Recover the
@@ -199,7 +198,9 @@ export function locateRollbackSurface(input) {
   let userIndex = -1
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAt(events, nodes[index])
-    if (event?.type === 'user/message' && event.data?.source?.kind === 'plugin' && ['compact', 'dsh-compaction-basic'].includes(event.data.source.plugin)) return null
+    const rollbackSource = event?.type === 'user/message' ? event.data?.source : null
+    if (rollbackSource && (rollbackSource.plugin === 'compact' || rollbackSource.plugin === 'dsh-compaction-basic' ||
+      rollbackSource.kind === 'compact-checkpoint' || rollbackSource.kind === 'compact-basic')) return null
     if (event && event.type === 'user/message' && !isForegroundContext(event) && !isRollbackUserTombstone(event)) {
       userIndex = index
       break
@@ -329,7 +330,7 @@ export function clearFailedTurnSurface(input) {
     id: makeId(),
     role: 'user',
     content: [],
-    source: { kind: 'plugin', plugin: 'dsh-tavern-failed-turn-cleanup' }
+    source: { kind: 'dsh-tavern-failed-turn-cleanup', plugin: 'dsh-tavern-failed-turn-cleanup' }
   }, { start: cleanup.start, end: cleanup.end, sourceEventSeqs: cleanup.shadowedSeqs })
   return cleanup.shadowedSeqs.length
 }
@@ -367,7 +368,7 @@ export function clearRegenerationAttemptSurface(input) {
     id: makeId(),
     role: 'user',
     content: [],
-    source: { kind: 'plugin', plugin: 'dsh-tavern-regeneration-abort' }
+    source: { kind: 'dsh-tavern-regeneration-abort', plugin: 'dsh-tavern-regeneration-abort' }
   }, { start: temporary[0], end: temporary[temporary.length - 1], sourceEventSeqs: temporary })
   return temporary.length
 }

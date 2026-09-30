@@ -1,6 +1,7 @@
 import { resolveRuntimePresetMacros } from './runtime-presets.js'
 import { createEphemeralCompatibilityRequest, isCompatibilityConversationRequest } from './compatibility-request.js'
 import { projectRuntimePresetRequest } from './runtime-preset-lifecycle.js'
+import { tavernSourceIs } from './message-source.js'
 
 function str(value) {
   return typeof value === 'string' ? value : (value === undefined || value === null ? '' : String(value))
@@ -15,7 +16,7 @@ function contentText(message) {
 
 function isTurnInput(message) {
   const source = message && message.source
-  return source && (source.kind === 'user' || (source.kind === 'plugin' && source.plugin === 'dsh-tavern-regen'))
+  return source && (source.kind === 'user' || tavernSourceIs(source, 'dsh-tavern-regen'))
 }
 
 function userTextOf(messages) {
@@ -37,7 +38,7 @@ function replaceTurnInput(messages, text) {
 
 function isRegenerationInput(message) {
   const source = message && message.source
-  return source && source.kind === 'plugin' && source.plugin === 'dsh-tavern-regen'
+  return source && tavernSourceIs(source, 'dsh-tavern-regen')
 }
 
 function isOriginalPlayerInput(message) {
@@ -80,7 +81,7 @@ function snapshotMessage(text) {
     role: 'user',
     content: [{ type: 'text', text: str(text) }],
     source: {
-      kind: 'plugin', plugin: 'dsh-tavern', form: 'snapshot',
+      kind: 'dsh-tavern', plugin: 'dsh-tavern', form: 'snapshot',
       sections: [{ name: 'tavern:turn', text: str(text) }]
     }
   }
@@ -89,7 +90,7 @@ function snapshotMessage(text) {
 function isNativeStablePrefix(message) {
   const source = message && message.source
   return str(message && message.id).startsWith('tavern-session-prefix:') && message.role === 'user'
-    && source && source.kind === 'plugin' && source.plugin === 'dsh-tavern'
+    && source && tavernSourceIs(source, 'dsh-tavern')
     && (source.form === 'snapshot' || source.form === 'session-prefix')
 }
 

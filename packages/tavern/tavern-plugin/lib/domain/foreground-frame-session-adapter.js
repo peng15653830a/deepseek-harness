@@ -28,7 +28,7 @@ export function createForegroundFrameSessionAdapter(options = {}) {
     const snapshots = snapshot ? [{
       id: makeId() + ':worldbook', role: 'user',
       content: [{ type: 'text', text: snapshot.rendered }],
-      source: { kind: 'plugin', plugin: 'dsh-tavern', form: 'worldbook-snapshot',
+      source: { kind: 'dsh-tavern', plugin: 'dsh-tavern', form: 'worldbook-snapshot',
         worldbookSnapshot: snapshot, trace: { frameId: frame.frameId, turn: frame.turn, operationId: frame.operationId } }
     }] : []
     const text = foregroundFrameText({ contributions })
@@ -46,7 +46,7 @@ export function createForegroundFrameSessionAdapter(options = {}) {
         role: 'user',
         content: [{ type: 'text', text }],
         source: {
-          kind: 'plugin',
+          kind: 'dsh-tavern',
           plugin: 'dsh-tavern',
           form: 'foreground-frame',
           sections,

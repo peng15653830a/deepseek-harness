@@ -51,6 +51,7 @@ import { generateHelperRaw } from './domain/helper-generation.js'
 import { createBodyEditor, synchronizeBodyEdits } from './domain/body-editor.js'
 import { appendHelperUserSessionContext } from './domain/helper-user-session-context.js'
 import { sessionOpeningDescriptor, prepareSessionOpening } from './domain/session-opening.js'
+import { tavernSourceIs } from './domain/message-source.js'
 import { scriptPromptScanText } from './domain/tavern-script-prompts.js'
 import { createOpeningPreparation } from './domain/opening-preparation.js'
 import { createChatHistoryImportService } from './domain/chat-history-import-service.js'
@@ -2385,7 +2386,7 @@ export async function apply(ctx) {
               role: 'user',
               regexPlacement: 2,
               content: [{ type: 'text', text: settleUserText(snapshot, backgroundTasksSettings.posture) }],
-              source: { kind: 'plugin', plugin: 'dsh-tavern' }
+              source: { kind: 'dsh-tavern', plugin: 'dsh-tavern' }
             }],
             system: [
               backgroundTasksSettings.posture ? runtimePrompt('posture-settlement') : '本轮不生成或提交姿势。完成启用的后台任务后简短回复完成。',
@@ -3641,7 +3642,7 @@ export async function apply(ctx) {
 
   function isTurnInput(message) {
     const source = message && message.source
-    return source && (source.kind === 'user' || (source.kind === 'plugin' && source.plugin === 'dsh-tavern-regen'))
+    return source && (source.kind === 'user' || tavernSourceIs(source, 'dsh-tavern-regen'))
   }
 
   function activeTurnOf(exec) {
@@ -3893,7 +3894,7 @@ export async function apply(ctx) {
         role: item.role,
         content: [{ type: 'text', text: item.content }],
         source: {
-          kind: 'plugin', plugin: 'dsh-tavern', form: 'sillytavern-compatibility',
+          kind: 'dsh-tavern', plugin: 'dsh-tavern', form: 'sillytavern-compatibility',
           sections: [{ name: 'tavern:sillytavern:' + label, text: item.content }],
           trace: item.source
         }
