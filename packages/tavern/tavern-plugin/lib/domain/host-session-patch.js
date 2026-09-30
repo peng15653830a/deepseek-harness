@@ -177,17 +177,17 @@ export async function prepareExpandedPatch(runtime, options = {}) {
 }
 
 export const SESSION_PATCH_PROTOCOL = 1
-export const SESSION_PATCH_VERSION = '0.1.5-rc.2'
+export const SESSION_PATCH_VERSION = '0.2.0-rc.2'
 const INSTALLED = Symbol.for('dsh-tavern.host-session-patch.v1')
 const PINNED_SHA256 = Object.freeze({
-  '@deepseek-ai/dsh-session/surface': 'aad7aaabe6cd9b39ae4cc3b50a2873c9b5d73b69d929051f31b18ecc13647c72',
-  '@deepseek-ai/dsh-session': '54575499986bbf0583020d863ecbcb43fd71e5e02d41f6a70c8919e83a0f9050',
-  '@deepseek-ai/dsh-session-persistence': '0dc2a1634e4b6ebb558aac214009da3dc00f54f315762a56a1841d12baf770d4',
-  '@deepseek-ai/dsh-session-format-v2-to-v3': '2d35e1e0ed497af569d5735fc590187de1568489cfe60d070b5f61330cd5a338',
-  '@deepseek-ai/dsh-session-format-catalog': 'bf4bde9e6563d7793f820c4a1b3141f6527283dd6c58f16bf43a67bc557cc48c',
-  '@deepseek-ai/dsh-session-persistence-jsonl': '7d0640c9fc4be6c703b77605fdee6af519c542fae28a6cd4489353309812f062',
-  '@deepseek-ai/dsh-session-query': 'c2a3954a0060942b179a92111cce556f27b8d659a4d815bb0e9defadbdb874da',
-  '@deepseek-ai/dsh-api-session-controller/client': 'ff33d1f85a0b2f14568fcb555d5f52d2ba5f57f2e0ecfa5d7885ba83e7ff6069',
+  '@deepseek-ai/dsh-session/surface': '7e9d4bd3b7c5b2eceed0f8b035e9c021237c72baa2b53e4c6fc941e8b417580e',
+  '@deepseek-ai/dsh-session': '87ea85e2fb5318bf1f826db9a1c88c1b26d3ea328027a7f32b211880c4d62b9d',
+  '@deepseek-ai/dsh-session-persistence': 'cc0b6d3a224133af611b428d5a49020e300f86c3b4ba28037aeb219029bde3eb',
+  '@deepseek-ai/dsh-session-format-v2-to-v3': '0dc56fb447e9046fc25995bcd08dbac26e832eba6e9eb583ef49d26467c27cd7',
+  '@deepseek-ai/dsh-session-format-catalog': '836bbb772ab505c299f1a4a246164c50c7c08b67ab0d17f1251d7ea2cd8c1818',
+  '@deepseek-ai/dsh-session-persistence-jsonl': '0845707017acc2b4a8a75eab2244fa3fd88587b8094ab32014321dce7ca1e31b',
+  '@deepseek-ai/dsh-session-query': 'dd8056fad008063c7e85169d4306720abe8efa6b32eac98f1b3053c6f89894aa',
+  '@deepseek-ai/dsh-api-session-controller/client': '60ec6a006443b40e5ab718f3fa53c301559c5c28427ca650c3851127ce370d43',
 })
 
 function hostRequireFrom(anchor) {

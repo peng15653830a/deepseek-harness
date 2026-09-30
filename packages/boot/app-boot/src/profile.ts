@@ -183,17 +183,6 @@ export const PROFILE_TEMPLATES: Record<string, ProfileTemplate> = {
   web: {
     bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'],
   },
-  tavern: {
-    bundles: [
-      '@deepseek-ai/dsh-base',
-      '@deepseek-ai/dsh-web-app',
-      'dsh-web-mobile',
-      'dsh-better-sidebar',
-      'dsh-tavern-plugin',
-      'dsh-tavern-remote',
-    ],
-    patchReload: 'live',
-  },
   headless: {
     bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'],
   },

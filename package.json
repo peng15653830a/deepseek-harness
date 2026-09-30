@@ -4,7 +4,7 @@
   "license": "MIT",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.7.0",
+  "packageManager": "pnpm@11.28.2",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
@@ -264,5 +264,9 @@
     "yaml": "2.9.0",
     "@deepseek-ai/dsh-skill-office": "workspace:*",
     "@deepseek-ai/dsh-tool-workspace-dependencies": "workspace:*"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis-plugin-group": "workspace:*",
+    "@deepseek-ai/cordis-plugin-loader": "workspace:*"
   }
 }

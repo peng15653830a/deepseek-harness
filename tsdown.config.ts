@@ -15,18 +15,6 @@ function isBuildFaceClient(value: unknown): boolean {
  * this pass (root package.json `build:lib:host`): its main bundle inlines
  * workspace devDependencies from their lib/ output, and tsdown builds
  * workspace members concurrently without ordering them.
- *
- * `packages/tavern/tavern-plugin` is excluded: its host and client halves are
- * hand-owned prebuilt ESM (`lib/*.js`), not TypeScript emit, so the bundler
- * has no entry to build for it. `packages/tavern/image-gen` is excluded for
- * the same reason as a mixed-face package: it builds through its own package
- * scripts once the client face has produced the sibling type declarations.
- * `packages/tavern/presets` and `packages/tavern/tests` are the ported
- * subtree's presets and test fixtures: they ship no package.json, so the
- * `packages/<group>/<package>` glob would otherwise adopt them as members and
- * apply the default entry, which resolves no file inside a directory holding
- * no sources. The same holds for `packages/tavern/bin`, the subtree's
- * launcher scripts restored from the Tavern upstream.
  */
 export default defineConfig(({ env }) => {
   const client = isBuildFaceClient(env?.DSH_BUILD_FACE)

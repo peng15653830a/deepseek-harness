@@ -38,11 +38,7 @@ export function createSessionSurfaceMutator(session, events = sessionEvents(sess
     const id = type === 'assistant/message' || type === 'tool/result' ? data.message?.id : data.id
     const normalized = sessionEventData(session, type, data)
     if (id) {
-      // `assistant/message` carries no sourceEventSeqs field, so its retry identity is
-      // the replacement range instead.
-      const prior = (replacements.get(type)?.get(id) || []).find(event => type === 'assistant/message'
-        ? isDeepStrictEqual(surfaceReplacementRange(event.surfaceOp), { start, end })
-        : isDeepStrictEqual(event.sourceEventSeqs, sourceEventSeqs))
+      const prior = (replacements.get(type)?.get(id) || []).find(event => isDeepStrictEqual(event.sourceEventSeqs, sourceEventSeqs))
       if (prior) {
         const range = surfaceReplacementRange(prior.surfaceOp)
         if (range.start === start && range.end === end && isDeepStrictEqual(prior.data, normalized)) return prior
@@ -60,12 +56,9 @@ export function createSessionSurfaceMutator(session, events = sessionEvents(sess
     const referenced = new Set(Array.isArray(sourceEventSeqs) ? sourceEventSeqs : [])
     if (!Array.isArray(sourceEventSeqs) || targets.some(seq => !referenced.has(seq)) ||
         sourceEventSeqs.some(seq => !Number.isSafeInteger(seq) || !bySeq.has(seq))) throw new Error('消息替换缺少有效的来源引用')
-    // The core rejects sourceEventSeqs on `assistant/message`: that event embeds its
-    // source stream, so only the replacement range is carried.
-    const intent = type === 'assistant/message'
-      ? { surfaceOp: { op: 'replace', start, end } }
-      : { surfaceOp: { op: 'replace', start, end }, sourceEventSeqs }
-    return append(type, data, intent)
+    return append(type, data, {
+      surfaceOp: { op: 'replace', start, end }, sourceEventSeqs
+    })
   }
   return { append, replace }
 }

@@ -460,30 +460,25 @@
 
     # The shared base enables the stable model-facing web_search and web_fetch
     # tools. The Web app disables this host row and composes both tools per agent
-    # preset; products with a stricter network policy override tool-web. Tavily
-    # search resolves $TAVILY_API_KEY from the launch environment (process,
-    # project .env, or Harness-home .env) when the provider mounts; a literal
-    # apiKey in its config wins. Anonymous fetch accepts only public HTTP(S)
-    # destinations, resolves and validates every destination, and pins every
-    # actual connection. Search is a network round trip to a third-party
-    # retrieval service, so this shipped route keeps 60s while the
-    # provider-neutral tool default remains 30s.
+    # preset; products with a stricter network policy override tool-web. DeepSeek
+    # search resolves the same DEEPSEEK_API_KEY
+    # credential the Models page manages for chat, at each search; its Messages
+    # endpoint is configured independently from the model route, so it takes its own
+    # base-URL override. Anonymous fetch accepts only public HTTP(S) destinations,
+    # resolves and validates every destination, and pins every actual connection.
+    # Search is a full auxiliary model request with server-side retrieval, so this
+    # shipped DeepSeek route gets 60s while the provider-neutral tool default
+    # remains 30s.
     - id: web
       name: '@deepseek-ai/dsh-web'
       config:
-        searchProvider: tavily
+        searchProvider: deepseek-official
         fetchProvider: http
 
     - id: web-search-deepseek
       name: '@deepseek-ai/dsh-web-search-deepseek'
       config:
         apiKeyEnv: DEEPSEEK_API_KEY
-
-    - id: web-search-tavily
-      name: '@deepseek-ai/dsh-web-search-tavily'
-
-    - id: web-search-searxng
-      name: '@deepseek-ai/dsh-web-search-searxng'
 
     - id: web-fetch-http
       name: '@deepseek-ai/dsh-web-fetch-http'

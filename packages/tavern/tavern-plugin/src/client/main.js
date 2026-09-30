@@ -542,13 +542,18 @@ window.__ModuleLoader__.load({
 		function createConversationHostAdapter(ctx) {
 			let injectedAgentPresets;
 			if (ctx && typeof ctx.inject === "function") {
-				ctx.inject(["remote.agentPresets"], function (scope) {
-					const service = scope.remote.agentPresets;
-					injectedAgentPresets = service;
-					return function () {
-						if (injectedAgentPresets === service) injectedAgentPresets = undefined;
-					};
-				});
+				try {
+					ctx.inject(["remote.agentPresets"], function (scope) {
+						const service = scope.remote.agentPresets;
+						injectedAgentPresets = service;
+						return function () {
+							if (injectedAgentPresets === service) injectedAgentPresets = undefined;
+						};
+					});
+				} catch (error) {
+					// A hot-reloaded plugin can render through its disposed context; the adapter
+					// falls back to ctx.remote.agentPresets and must not crash the slot.
+				}
 			}
 			return Object.freeze({
 				workspaceId: function (snapshot, sessionId) {
@@ -6647,15 +6652,20 @@ window.__ModuleLoader__.load({
 				const releaseLandingStyles = installTavernLandingStyles(document);
 				return function () { releaseLandingStyles(); document.body.classList.remove("dsh-tavern-shell-active"); };
 			}, "dsh-tavern: shell marker");
-			ctx.effect(() => slots.inject("sidebar.workspaces", () => slots.register(
+			ctx.effect(() => slots.inject("sidebar.workspaces", () => {
+				// Open the adapter's child scope once per registration: a scope created during
+				// render leaks fibers and throws once the plugin context is disposed.
+				const conversationHost = createConversationHostAdapter(ctx);
+				const executeSlash = createTavernFrameSlashExecutor(ctx);
+				return slots.register(
 				{ name: "sidebar.workspaces", priority: -1 },
 				function (props) { return React.createElement(TavernSidebar, Object.assign({}, props, {
 					collapsed: !props.wide,
 					embedded: true,
 					sessions: ctx.sessions,
 					workspaces: ctx.workspaces,
-					conversationHost: createConversationHostAdapter(ctx),
-                    executeSlash: createTavernFrameSlashExecutor(ctx),
+					conversationHost: conversationHost,
+					executeSlash: executeSlash,
 					renameSession: async function (sessionId, title) {
 						const session = ctx.sessions.binding(sessionId)?.session;
 						if (session === undefined) throw new Error("找不到该对话");
@@ -6675,7 +6685,8 @@ window.__ModuleLoader__.load({
 					injectTaskPrompt: input.injectTaskPrompt,
 					cleanWorkspaceDraft: input.cleanWorkspaceDraft
 				})); }
-			)), "dsh-tavern: Tavern workspace browser");
+				);
+			}), "dsh-tavern: Tavern workspace browser");
 		}
 		return Object.freeze({ register: register });
 		}

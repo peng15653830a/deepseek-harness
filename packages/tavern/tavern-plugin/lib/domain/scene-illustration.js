@@ -652,8 +652,11 @@ export function createSceneIllustrations(deps) {
   }
   async function autoBatch(sessionId, turn) {
     const settings = await setup.config()
-    if (!settings.enabled || !settings.auto?.enabled) return
+    if (!settings.auto?.enabled) return
     const { chat, target, path } = await resolve(sessionId, turn)
+    // The conversation switch owns generation, matching start(); the module
+    // document's flag is only the fallback for conversations that never stored one.
+    if (!(typeof chat.sceneImagesEnabled === 'boolean' ? chat.sceneImagesEnabled : settings.enabled)) return
     const latest = [...(chat.messages || [])].reverse().find(item => item.role === 'assistant')
     // Only the newest settled turn earns a batch; history stays as the player left it.
     if (Number(latest?.turn || (latest?.greeting ? 1 : 0)) !== target.turn || chat.settleStatus !== 'done') return
