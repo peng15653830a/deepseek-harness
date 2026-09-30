@@ -44,10 +44,9 @@
   disabled: !!js process.platform !== 'win32'
 - id: tool-fs
   disabled: false
-- id: agent-presets
+- id: agent-preset-registry
   config:
     default: tavern
-    includeUserRoot: false
 - id: tool-web
   disabled: false
   config:

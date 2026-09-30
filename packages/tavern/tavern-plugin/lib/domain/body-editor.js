@@ -44,7 +44,9 @@ export function createBodyEditor({ chats, sessions, timeline, activity, project,
     refuseClosedPatch()
     const chat = await chats.forSession(sessionId)
     if (!chat) throw new Error('会话不存在')
-    const agent = sessions.get(sessionId)
+    // 0.2 的网页运行时按需激活 Agent：查看历史不会常驻原生会话，写路径先补挂。
+    let agent = sessions.get(sessionId)
+    if (!agent?.session && typeof sessions.resume === 'function') agent = (await sessions.resume(sessionId)).agent
     if (!agent?.session) throw new Error('无法访问原生会话')
     idle(chat, agent)
     await synchronizeBodyEdits(agent.session, chat, sessions.flush)

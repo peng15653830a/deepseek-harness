@@ -1,4 +1,4 @@
-// In-memory host/client patch for DSH 0.1.5-rc.2. Official package files stay unchanged.
+// In-memory host/client patch for DSH 0.2.0-rc.2. Official package files stay unchanged.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -100,8 +100,35 @@ export async function prepareExpandedPatch(runtime, options = {}) {
     await compile('@deepseek-ai/dsh-session-format-v2-to-v3', text => once(text,
       'if (event.type === "assistant/message" && sources !== void 0) throw',
       `if (event.type === "assistant/message" && sources !== void 0 && !${own}) throw`))
-    const { sessionFormatCatalog: catalog } = await compile('@deepseek-ai/dsh-session-format-catalog')
-    const { default: PatchedPersistence } = await compile('@deepseek-ai/dsh-session-persistence-jsonl')
+    // 0.2 migrates stored v3 journals to v4 on read; teach that migration the
+    // tavern marker so history written by the 0.1.5 port still loads, and let
+    // tavern's system prompts and greeting/edit narrative messages sit outside
+    // an open turn like they always did. The catalog clone compiled below
+    // reroutes to this clone via the urls map.
+    await compile('@deepseek-ai/dsh-session-format-v3-to-v4', text => once(once(once(text,
+      '\t"workspace/changes"\n]);',
+      '\t"workspace/changes",\n\t"dsh-tavern/required-session-patch-v1"\n]);'),
+      'if (STEP_EVENT_TYPES.has(event.type)) this.requireStep(event, data);',
+      'if (event.type === "developer/message" || event.type === "assistant/attempt") this.requireStep(event, data);'),
+      '\t\t\treturn;\n\t\t}\n\t\tthis.requireStep(event, data);',
+      '\t\t\treturn;\n\t\t}\n\t\tif (event.type !== "assistant/message") this.requireStep(event, data);'))
+    const cloneCatalog = await compile('@deepseek-ai/dsh-session-format-catalog')
+    const catalog = cloneCatalog.sessionFormatCatalog
+    const catalogWithChildren = cloneCatalog.createSessionFormatCatalogWithChildren
+    // The migrated generation is verified by a worker thread whose fresh copy
+    // of the format packages would refuse tavern's marker and out-of-turn
+    // messages. Verify physically in-process instead: the patched restore
+    // above already did the full logical validation.
+    const { default: PatchedPersistence } = await compile('@deepseek-ai/dsh-session-persistence-jsonl', text => once(text,
+      'verifyCurrentFile: verifyCurrentGenerationInWorker,',
+      `verifyCurrentFile: async (path, compression, expectedId, expectedEventCount, expectedPrefix, signal) => {
+        signal?.throwIfAborted?.();
+        const fsp = await import("node:fs/promises");
+        const { createHash } = await import("node:crypto");
+        const [info, file] = await Promise.all([fsp.stat(path, { bigint: true }), fsp.readFile(path)]);
+        const digest = createHash("sha256").update(file).digest("hex");
+        return { identity: [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(":"), bytes: file.length, digest };
+      },`))
     const query = await compile('@deepseek-ai/dsh-session-query', text =>
       `import { SessionQueryError as NativeQueryError } from ${JSON.stringify(pathToFileURL(require.resolve('@deepseek-ai/dsh-session-query')).href)};\n` +
       text.replace(/\bnew SessionQueryError\(/g, 'new NativeQueryError(').replace(/\binstanceof SessionQueryError\b/g, 'instanceof NativeQueryError') +
@@ -112,7 +139,7 @@ export async function prepareExpandedPatch(runtime, options = {}) {
       `if (event.type === "assistant/message" && raw !== void 0 && !${own}) throw`)
     const undoPersistence = []
     return {
-      catalog, patchedSurface, clientSource, marker,
+      catalog, catalogWithChildren, patchedSurface, clientSource, marker,
       patchQuery(instance) {
         assert.equal(instance._observations.cache.size, 0, 'Install before querying Session history')
         for (const [target, prototype] of [
@@ -184,6 +211,7 @@ const PINNED_SHA256 = Object.freeze({
   '@deepseek-ai/dsh-session': '87ea85e2fb5318bf1f826db9a1c88c1b26d3ea328027a7f32b211880c4d62b9d',
   '@deepseek-ai/dsh-session-persistence': 'cc0b6d3a224133af611b428d5a49020e300f86c3b4ba28037aeb219029bde3eb',
   '@deepseek-ai/dsh-session-format-v2-to-v3': '0dc56fb447e9046fc25995bcd08dbac26e832eba6e9eb583ef49d26467c27cd7',
+  '@deepseek-ai/dsh-session-format-v3-to-v4': '382a3f28b95e0b9504969ac6f407f909aef0ba4699c3175d36c0ef91b31cfde2',
   '@deepseek-ai/dsh-session-format-catalog': '836bbb772ab505c299f1a4a246164c50c7c08b67ab0d17f1251d7ea2cd8c1818',
   '@deepseek-ai/dsh-session-persistence-jsonl': '0845707017acc2b4a8a75eab2244fa3fd88587b8094ab32014321dce7ca1e31b',
   '@deepseek-ai/dsh-session-query': 'dd8056fad008063c7e85169d4306720abe8efa6b32eac98f1b3053c6f89894aa',
@@ -307,7 +335,7 @@ export async function installHostSessionPatch({ hostRequire, persistence, query 
     catch (error) {
       return finish({ status: 'failed', hostVersion, reason: '无法校验宿主文件 ' + name + '：' + (error.message || error) })
     }
-    if (actual !== expected) return finish({ status: 'failed', hostVersion, reason: '宿主文件与 0.1.5-rc.2 补丁清单不一致：' + name })
+    if (actual !== expected) return finish({ status: 'failed', hostVersion, reason: '宿主文件与 0.2.0-rc.2 补丁清单不一致：' + name })
   }
   if (!persistence?.tracker?.openHandles || !persistence?.tracker?.writers) {
     return finish({ status: 'failed', hostVersion, reason: '宿主没有 JSONL 会话存储，不能安装补丁' })

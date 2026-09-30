@@ -266,6 +266,7 @@
     "@deepseek-ai/dsh-tool-workspace-dependencies": "workspace:*"
   },
   "dependencies": {
+    "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/cordis-plugin-group": "workspace:*",
     "@deepseek-ai/cordis-plugin-loader": "workspace:*"
   }

@@ -1,4 +1,8 @@
 import { createMvuConversion } from './domain/mvu-conversion.js'
+import { isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
+import * as YAML from 'js-yaml'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { registerMvuConversionTools } from './domain/mvu-conversion-tools.js'
 import { isRescuedHistoryMessage, rescueHistoryNotice } from './domain/chat-history-rescue.js'
 import { readHostCompatibility } from './domain/host-compatibility.js'
@@ -54,6 +58,7 @@ import { createImportContextPreparation, needsImportContextPreparation } from '.
 import { sessionEvents, appendSessionEvent } from './domain/session-events.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createBackgroundAgentRunner, executeBackgroundCompaction } from './background-agent-runner.js'
 import { createApplicationUpdater } from './application-updater.js'
@@ -372,14 +377,29 @@ export async function apply(ctx) {
   })
 
   // ---------- profile 私有 preset ----------
-  // rc.6 启动器会固定系统 roots，因此在独立 Tavern 进程内追加 profile 自带目录。
-  // 不写入全局 `.agent-presets`，避免 Tavern 出现在普通 Web profile 的模式列表。
+  // 0.2 的预设是注册表声明：把两份 agent.cordis.yml 注册为 tavern / tavern-background。
+  // 行内的相对路径以预设目录为基准，这里改写成绝对文件 URL，与挂载目录解耦。
   const agentPresetsProxy = ctx.get('agentPresets')
   if (agentPresetsProxy === undefined) throw new Error('dsh-tavern: 缺少 agentPresets 服务')
   const agentPresets = agentPresetsProxy[Symbol.for('cordis.original')] || agentPresetsProxy
-  const presetSourceDir = fileURLToPath(new URL('../../presets/', import.meta.url))
-  if (!agentPresets.resolvedRoots.some(function (root) { return root.path === presetSourceDir })) {
-    agentPresets.resolvedRoots.unshift({ path: presetSourceDir, trust: 'user' })
+  const jsExprType = new YAML.Type('tag:yaml.org,2002:js', {
+    kind: 'scalar',
+    resolve: (data) => typeof data === 'string',
+    construct: (data) => ({ __jsExpr: data }),
+    predicate: isJsExpr,
+    represent: (data) => data.__jsExpr,
+  })
+  const presetSchema = YAML.DEFAULT_SCHEMA.extend({ explicit: [jsExprType] })
+  for (const [presetId, presetDir, presetName] of [
+    ['tavern', 'tavern', '酒馆模式'],
+    ['tavern-background', 'tavern-background', '酒馆后台'],
+  ]) {
+    const base = fileURLToPath(new URL('../../presets/' + presetDir + '/', import.meta.url))
+    const plugins = YAML.load(readFileSync(join(base, 'agent.cordis.yml'), 'utf8'), { schema: presetSchema })
+    for (const row of plugins) {
+      if (typeof row?.name === 'string' && row.name.startsWith('./')) row.name = pathToFileURL(join(base, row.name)).href
+    }
+    ctx.effect(() => agentPresets.register({ id: presetId, name: presetName, plugins }), 'dsh-tavern: register agent preset ' + presetId)
   }
 
   // ---------- 基础工具 ----------
@@ -2786,7 +2806,7 @@ export async function apply(ctx) {
 
   const bodyEditor = createBodyEditor({
     chats: { forSession: chatForSession, update: updateChat },
-    sessions: { get: id => ctx.get('agents')?.get(id), flush: session => sessionStore.flush(session) },
+    sessions: { get: id => ctx.get('agents')?.get(id), flush: session => sessionStore.flush(session), resume: sessionId => agentRegistry.resume({ resumeSessionId: sessionId }) },
     timeline: storyTimeline,
     activity: chat => backgroundTasks.activity(chat),
     project: async (text, chat) => {

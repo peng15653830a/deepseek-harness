@@ -109,7 +109,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     const storedSessionId = chat.sessionId
     if (typeof sessionId === 'string' && sessionId !== '') chat.sessionId = sessionId
     if (typeof chat.sessionId !== 'string' || chat.sessionId === '') throw new Error('会话未绑定 DSH 会话')
-    const agent = sessions.get(chat.sessionId)
+    let agent = sessions.get(chat.sessionId)
+    if (!agent?.session && typeof sessions.resume === 'function') agent = (await sessions.resume(chat.sessionId)).agent
     if (agent === undefined || agent.session === undefined) throw new Error('无法访问 DSH 会话: ' + chat.sessionId)
     if (agent.phase?.kind === 'running') throw new Error('前台正在生成，请完成或停止后再重新生成')
     const session = agent.session
@@ -300,7 +301,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     const mode = chat.mode || 'story'
     if (mode !== 'story' && mode !== 'script') throw new Error('仅游玩模式支持回退本轮')
     const card = await readChatCard(chat)
-    const agent = sessions.get(chat.sessionId)
+    let agent = sessions.get(chat.sessionId)
+    if (!agent?.session && typeof sessions.resume === 'function') agent = (await sessions.resume(chat.sessionId)).agent
     if (agent === undefined || agent.session === undefined) throw new Error('无法访问 DSH 会话: ' + chat.sessionId)
     const session = agent.session
     const events = sessionEvents(session)
@@ -512,7 +514,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
   async function undoRollback(sessionId, chatId) {
     const chat = str(chatId) === '' ? await chatForSession(sessionId) : await readChat(chatId)
     if (!chat || pendingRollbacks.has(chat.id)) throw new Error('没有可撤销的回退，或正在处理回退')
-    const agent = sessions.get(chat.sessionId)
+    let agent = sessions.get(chat.sessionId)
+    if (!agent?.session && typeof sessions.resume === 'function') agent = (await sessions.resume(chat.sessionId)).agent
     if (agent?.phase?.kind === 'running' || !canUndoRollback(chat, agent?.session)) throw new Error('撤销回退已失效：对话已有新操作，请刷新页面')
     pendingRollbacks.add(chat.id)
     const handles = []
