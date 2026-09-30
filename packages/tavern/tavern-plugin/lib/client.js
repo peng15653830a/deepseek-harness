@@ -1135,6 +1135,14 @@ window.__ModuleLoader__.load({
 			};
 		}
 
+		// 0.2 把会话导航从 ctx.sessions 挪到了 uiWorkspace 服务（视图层持有）。
+		// 惰性解析：uiWorkspace 尚未挂载时返回 null，调用方回退到 0.1.5 的 sessions.open。
+		function createHostNavigationAccessor(ctx) {
+			return function () {
+				try { return ctx.get("uiWorkspace") || null; } catch (error) { return null; }
+			};
+		}
+
 		function createSessionListRecoveryModule(options) {
 			for (const method of ["summary", "binding", "refresh", "open"]) {
 				if (!options || typeof options[method] !== "function") throw new Error("Session List Recovery 缺少 " + method + " adapter");
@@ -7846,6 +7854,24 @@ window.__ModuleLoader__.load({
 		}
 		function TavernSidebar(props) {
             const askConfirm = useTavernConfirm(props.sessionId || props.scope?.sessionId);
+			// 0.2 的会话导航在 uiWorkspace 服务上；0.1.5 宿主则保留 sessions.open/clear。
+			function resolveHostNavigation() {
+				const nav = props.hostNavigation ? props.hostNavigation() : null;
+				if (nav && typeof nav.openSession === "function") return nav;
+				if (props.sessions && typeof props.sessions.open === "function") return props.sessions;
+				return null;
+			}
+			function openConversation(sessionId) {
+				const nav = resolveHostNavigation();
+				if (!nav) throw new Error("宿主未提供会话导航 API，请刷新页面重试");
+				if (nav === props.sessions) nav.open(sessionId);
+				else nav.openSession(sessionId);
+			}
+			function clearCurrentConversation() {
+				const nav = resolveHostNavigation();
+				if (nav && nav !== props.sessions && typeof nav.clearMain === "function") { nav.clearMain(); return; }
+				if (props.sessions && typeof props.sessions.clear === "function") props.sessions.clear();
+			}
 			function TavernCardListContent(props) {
 				const card = props.card;
 				const image = card && card.hasImage ? React.createElement("img", {
@@ -7928,7 +7954,7 @@ window.__ModuleLoader__.load({
 					setDeleteNotice("已删除 " + removed.length + " 个" + (failures.length ? "，" + failures.length + " 个失败，可重试" : ""));
 					if (failures.length) setError(failures.map(function (result) { const item = items.find(function (item) { return item.chatId === result.chatId; }); return (item && (item.title || item.cardName) || result.chatId) + "：" + result.error; }).join("\n"));
 					if (items.some(function (item) { return item.sessionId === current && removed.includes(item.chatId); })) {
-						props.sessions.clear();
+						clearCurrentConversation();
 						const next = visibleHistory.find(function (item) { return !removed.includes(item.chatId); });
 						if (next) await openSessionWhenReady(next.sessionId);
 						else openPicker("cards");
@@ -7965,7 +7991,7 @@ window.__ModuleLoader__.load({
 					summary: function (sessionId) { return props.sessions.list.getSnapshot().byId[sessionId]; },
 					binding: function (sessionId) { return props.sessions.binding(sessionId); },
 					refresh: function () { return typeof props.sessions.refresh === "function" ? props.sessions.refresh() : Promise.resolve(); },
-					open: function (sessionId) { props.sessions.open(sessionId); },
+					open: function (sessionId) { openConversation(sessionId); },
 					isUnknownSession: isUnknownSessionSelectError
 				});
 			}
@@ -8456,7 +8482,7 @@ window.__ModuleLoader__.load({
 					const target = history.filter(function (item) {
 						return isPlayMode(item.mode) && (item.requestMode === "sillytavern" ? "sillytavern" : "dsh") === nextRequestMode;
 					})[0];
-					if (!target) { props.sessions.clear(); openPicker(); return; }
+					if (!target) { clearCurrentConversation(); openPicker(); return; }
 					if (target.sessionId !== current) await openSessionWhenReady(target.sessionId);
 				} catch (err) { setError("切换对话列表失败：" + String(err && err.message || err)); }
 				finally { setBusy(false); }
@@ -8513,7 +8539,7 @@ window.__ModuleLoader__.load({
 							return (entry.requestMode === "sillytavern" ? "sillytavern" : "dsh") === requestMode;
 						})[0];
 						if (next) await openSessionWhenReady(next.sessionId);
-						else { props.sessions.clear(); openPicker("cards"); }
+						else { clearCurrentConversation(); openPicker("cards"); }
 					}
 					await refresh();
 				} catch (err) { setError(String(err && err.message || err)); }
@@ -8818,6 +8844,7 @@ window.__ModuleLoader__.load({
 					collapsed: !props.wide,
 					embedded: true,
 					sessions: ctx.sessions,
+					hostNavigation: createHostNavigationAccessor(ctx),
 					workspaces: ctx.workspaces,
 					conversationHost: conversationHost,
 					executeSlash: executeSlash,
@@ -12663,8 +12690,11 @@ window.__ModuleLoader__.load({
 				} }, "✎ 自由行动（直接在下方输入）") : null,
 				expanded && panel.phase === "ready" && panel.traceSessionId ? h("button", { className: "dsh-tavern-question-free", title: panel.traceMode === "continuable" ? "打开持续存在的后台 Agent" : "打开后台候选任务的推理与工具调用记录", onClick: async function () {
 					try {
-						await props.sessions.refreshSubagents(panel.sessionId);
-						props.sessions.openSubagent({ parentSessionId: panel.sessionId, childSessionId: panel.traceSessionId, mode: panel.traceMode });
+						if (typeof props.sessions.refresh === "function") await props.sessions.refresh();
+						const nav = props.hostNavigation ? props.hostNavigation() : null;
+						if (nav && typeof nav.openSession === "function") nav.openSession(panel.traceSessionId);
+						else if (props.sessions && typeof props.sessions.openSubagent === "function") props.sessions.openSubagent({ parentSessionId: panel.sessionId, childSessionId: panel.traceSessionId, mode: panel.traceMode });
+						else throw new Error("宿主未提供会话导航 API");
 					} catch (err) {
 						tavernErrorHub.report("后台 Agent 轨迹", "无法打开后台 Agent 轨迹：" + String(err && err.message || err));
 					}
@@ -12822,7 +12852,7 @@ window.__ModuleLoader__.load({
 				function (props) { return React.createElement(React.Fragment, null,
 					React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId })),
 					React.createElement(TurnHistoryProjection, Object.assign({}, props, { key: "history:" + props.sessionId })),
-					React.createElement(CandidateQuestion, Object.assign({}, props, { sessions: ctx.sessions }))
+					React.createElement(CandidateQuestion, Object.assign({}, props, { sessions: ctx.sessions, hostNavigation: createHostNavigationAccessor(ctx) }))
 				); }
 			)), "dsh-tavern: candidate question panel");
 			ctx.effect(() => slots.inject("conversation.input.dock", () => slots.register(
