@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-13-tavern-subtree-novelai-and-auto-illustration.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-13-tavern-subtree-novelai-and-auto-illustration.md
-2026-09-13-tavern-subtree-novelai-and-auto-illustration.md: fabe1702f6510aaa1fd38187448a7ae1be4c35b6
-2026-09-13-tavern-subtree-novelai-and-auto-illustration.zh.md: 74b2ffa0d75f52f9eec85d14e707802026c0dfe4
+/agent-note-tavern-subtree-with-a-novelai-channel-and-automatic-illustration-batches:
+  en: 8c97881a639fbf3c
+  zh: 6a317ab09dd19202
+/agent-note-tavern-subtree-with-a-novelai-channel-and-automatic-illustration-batches/problem:
+  en: b2ad79ac07f599c7
+  zh: c6229a8eda23a4ef
+/agent-note-tavern-subtree-with-a-novelai-channel-and-automatic-illustration-batches/decision:
+  en: 10ddefeac03c21a8
+  zh: c8501e8fdfc91965
+/agent-note-tavern-subtree-with-a-novelai-channel-and-automatic-illustration-batches/alternatives-considered:
+  en: 8ce94154d4f88381
+  zh: 460aacf17d8f0119
+/agent-note-tavern-subtree-with-a-novelai-channel-and-automatic-illustration-batches/consequences:
+  en: 163c460d9b65fa8f
+  zh: de0889e9bf68cda7

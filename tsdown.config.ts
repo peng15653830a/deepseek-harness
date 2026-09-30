@@ -11,7 +11,10 @@ function isBuildFaceClient(value: unknown): boolean {
  * The ordinary workspace build consumes JavaScript emitted by the Host
  * TypeScript project and runs Typert. The Client pass selects packages that
  * declare a browser bundle and lets their package-local configs emit both
- * their Node loader entry and browser artifact.
+ * their Node loader entry and browser artifact. `apps/desktop` bundles after
+ * this pass (root package.json `build:lib:host`): its main bundle inlines
+ * workspace devDependencies from their lib/ output, and tsdown builds
+ * workspace members concurrently without ordering them.
  *
  * `packages/tavern/tavern-plugin` is excluded: its host and client halves are
  * hand-owned prebuilt ESM (`lib/*.js`), not TypeScript emit, so the bundler
@@ -30,7 +33,7 @@ export default defineConfig(({ env }) => {
   return {
     workspace: client
       ? ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', '!packages/tavern/config', '!packages/tavern/references', 'apps/cli']
-      : ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', '!packages/tavern/config', '!packages/tavern/references', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
+      : ['vendor/*', 'packages/*/*', '!packages/tavern/tavern-plugin', '!packages/tavern/image-gen', '!packages/tavern/presets', '!packages/tavern/tests', '!packages/tavern/bin', '!packages/tavern/config', '!packages/tavern/references', 'apps/cli', 'apps/desktop-host'],
     entry: client ? '' : ['lib/types/{index,invariant,startup}.js'],
     outDir: 'lib',
     format: ['esm'],
