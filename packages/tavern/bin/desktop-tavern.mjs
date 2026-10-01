@@ -1,19 +1,21 @@
 /**
  * Launch the unpackaged Electron desktop shell with the Tavern plugin bundles mounted.
  *
- * The desktop development launcher regenerates its disposable profile on every start and
- * mounts only the two built-in bundles, so this wrapper re-applies the Tavern bundle set
- * after that preparation and before Electron starts. The desktop host serves those
- * plugins' HTTP surfaces through its own transport (see the web rows it keeps mounted).
+ * Mirrors apps/desktop/scripts/dev.ts for 0.2 (target-aware disposable project, primary
+ * runtime preparation, Electron-as-Node release identity) and re-applies the Tavern
+ * bundle set to the freshly generated disposable profile before Electron starts.
  *
  * Usage: node_modules/.bin/tsx packages/tavern/bin/desktop-tavern.mjs [--skip-build]
  */
-import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { DESKTOP_HOST_PROTOCOL_VERSION } from '../../../apps/desktop/src/host-protocol.ts'
+import { resolveDesktopBuildTarget } from '../../../apps/desktop/scripts/desktop-build-paths.mjs'
 import { prepareDevelopmentProject } from '../../../apps/desktop/scripts/development-project.ts'
+import { preparePrimaryRuntime } from '../../../apps/desktop/scripts/prepare-primary-runtime.ts'
+import { developmentRuntimeDirectory } from '../../../apps/desktop/scripts/desktop-build-paths.mjs'
 
 const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..', '..')
 const APP_ROOT = join(REPOSITORY_ROOT, 'apps', 'desktop')
@@ -51,9 +53,10 @@ function run(command, args, cwd, environment = process.env) {
 
 /** Stop the previously launched shell so its single-instance lock and profile directory are free. */
 async function stopRunningShell() {
-  const escaped = APP_ROOT.replace(/\\/g, '\\\\')
+  // Match on spell-stable distinctive substrings: the Electron shell always
+  // carries the development user-data dir, the Host child its app directory.
   const script = [
-    `$shells = @(Get-CimInstance Win32_Process -Filter "Name='electron.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*${escaped}*' })`,
+    `$shells = @(Get-CimInstance Win32_Process -Filter "Name='electron.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*desktop-build*' })`,
     // The Host child process holds the disposable profile as its working directory.
     `$hosts = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*desktop-host*' })`,
     `foreach ($target in $shells + $hosts) { taskkill /T /F /PID $target.ProcessId 2>&1 | Out-Null }`,
@@ -64,33 +67,44 @@ async function stopRunningShell() {
 
 /** Mount the Tavern bundles in the freshly generated disposable profile. */
 function mountTavernBundles() {
-  const manifestPath = join(PROJECT_DIR, 'package.json')
-  const manifest = readJson(manifestPath)
-  const dependencies = { ...(manifest.dependencies ?? {}) }
-  for (const name of TAVERN_BUNDLES) {
-    const installed = join(PROJECT_DIR, 'node_modules', ...name.split('/'), 'package.json')
-    if (!existsSync(installed)) throw new Error(`desktop tavern: ${name} is missing from the development profile; run pnpm install`)
-    const version = readJson(installed).version
-    if (typeof version !== 'string' || version === '') throw new Error(`desktop tavern: ${name} has no version`)
-    dependencies[name] = version
-  }
-  const bundles = [...BUILTIN_BUNDLES, ...TAVERN_BUNDLES]
+  // 0.2 boots the Host from the durable home profile, not the regenerated
+  // runtime project: the project only anchors package resolution.
+  const profileDir = join(DEVELOPMENT_ROOT, 'home', 'profiles', 'desktop')
+  mkdirSync(profileDir, { recursive: true })
+  const manifestPath = join(profileDir, 'package.json')
+  const manifest = existsSync(manifestPath)
+    ? readJson(manifestPath)
+    : { name: 'dsh-profile-desktop', private: true, dsh: { profile: { bundles: [] } } }
+  const bundles = [...new Set([...(manifest.dsh?.profile?.bundles ?? BUILTIN_BUNDLES), ...TAVERN_BUNDLES])]
   const dsh = { ...manifest.dsh, profile: { ...manifest.dsh?.profile, bundles } }
-  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, dependencies, dsh }, undefined, 2)}\n`)
-  console.log(`desktop tavern: mounted ${TAVERN_BUNDLES.join(', ')}`)
+  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, dsh }, undefined, 2)}\n`)
+  // The disposable profile is regenerated on every start, so the better-sidebar
+  // 0.2 version exemption the Web profile grants once must be re-granted here.
+  const exemptionsPath = join(profileDir, 'compatibility.json')
+  const exemptions = existsSync(exemptionsPath) ? readJson(exemptionsPath) : {}
+  const dshVersion = readJson(join(REPOSITORY_ROOT, 'apps', 'cli', 'package.json')).version
+  for (const name of TAVERN_BUNDLES) {
+    const version = readJson(join(PROJECT_DIR, 'node_modules', ...name.split('/'), 'package.json')).version
+    exemptions[`${name}@${version}`] = [...new Set([...(exemptions[`${name}@${version}`] ?? []), dshVersion])]
+  }
+  writeFileSync(exemptionsPath, `${JSON.stringify(exemptions, undefined, 2)}\n`)
+  console.log(`desktop tavern: mounted ${TAVERN_BUNDLES.join(', ')} (compatibility exemptions granted)`)
 }
 
+
 async function launchElectron() {
+  const electron = electronExecutable()
   const environment = {
     ...process.env,
     DSH_HOME: resolve(process.env.DSH_HOME ?? join(DEVELOPMENT_ROOT, 'home')),
+    DSH_DESKTOP_PRIMARY_RUNTIME_DIR: process.env.DSH_DESKTOP_PRIMARY_RUNTIME_DIR ?? developmentRuntimeDirectory(),
     DSH_DESKTOP_HOST_INSPECT_PORT: process.env.DSH_DESKTOP_HOST_INSPECT_PORT ?? '9230',
     DSH_DESKTOP_NODE_BINARY: process.execPath,
     DSH_DESKTOP_OPEN_DEVTOOLS: process.env.DSH_DESKTOP_OPEN_DEVTOOLS ?? '0',
     ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING ?? '1',
   }
   console.log(`desktop tavern: DSH_HOME=${environment.DSH_HOME}`)
-  await run(electronExecutable(), [
+  await run(electron, [
     `--inspect=127.0.0.1:${process.env.DSH_DESKTOP_MAIN_INSPECT_PORT ?? '9229'}`,
     `--remote-debugging-port=${process.env.DSH_DESKTOP_RENDERER_DEBUG_PORT ?? '9222'}`,
     `--user-data-dir=${join(DEVELOPMENT_ROOT, 'electron-user-data')}`,
@@ -103,11 +117,14 @@ async function main() {
     await run(process.execPath, [process.env.npm_execpath, 'run', 'build'], REPOSITORY_ROOT)
     await run(process.execPath, [process.env.npm_execpath, 'run', 'build'], APP_ROOT)
   }
+  const electron = electronExecutable()
   const release = {
     schemaVersion: 1,
     version: readJson(join(APP_ROOT, 'package.json')).version,
     hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
-    nodeVersion: process.versions.node,
+    // The Host child runs under Electron-as-Node, not the launcher's Node.
+    nodeVersion: execFileSync(electron, ['-p', 'process.versions.node'],
+      { encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).trim(),
     pnpmVersion: readJson(join(APP_ROOT, 'node_modules', 'pnpm', 'package.json')).version,
   }
   await stopRunningShell()
@@ -117,8 +134,10 @@ async function main() {
     hostDir: join(REPOSITORY_ROOT, 'apps', 'desktop-host'),
     dependencyDir: join(REPOSITORY_ROOT, 'node_modules', '.pnpm', 'node_modules'),
     release,
+    target: resolveDesktopBuildTarget(),
   })
   mountTavernBundles()
+  await preparePrimaryRuntime()
   await launchElectron()
 }
 
