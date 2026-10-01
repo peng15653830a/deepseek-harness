@@ -33,6 +33,10 @@ export function proseTagProblem(profile, tags) {
 function invalid(path, message) { throw new Error('参数内容错误：' + path + ' ' + message) }
 /** Weak local models emit nested objects as bare prose or JSON strings; coerce the common shapes before validation. */
 const coerceVisual = value => {
+  if (typeof value === 'string' && hasParameterMarkers(value)) {
+    const blocks = parseParameterBlocks(value)
+    value = typeof blocks.text === 'string' ? blocks.text : Object.values(blocks).find(v => typeof v === 'string' && v.trim()) ?? ''
+  }
   if (typeof value === 'string') return { text: value, tags: value }
   if (typeOf(value) !== 'object') return value
   const text = typeof value.text === 'string' ? value.text : ''
@@ -46,6 +50,74 @@ const coerceObjectArg = value => {
     try { const parsed = JSON.parse(trimmed); if (typeOf(parsed) === 'object') return parsed } catch { /* bare prose below */ }
   }
   return null
+}
+/** Nemotron 模板的工具调用是 <parameter=key>value 树；OpenRouter 只拆一层，嵌套标记留在值里。
+ *  按 schema 引导解析：对象的子标记递归归位，字符串标记解出 text，未知键保留（交由拍平归位）或交还上层。 */
+const hasParameterMarkers = value => typeof value === 'string' && value.includes('<parameter=')
+function parseParameterBlocks(raw) {
+  const blocks = {}
+  const matches = [...raw.matchAll(/<parameter=([^>]+)>/g)]
+  for (let index = 0; index < matches.length; index++) {
+    const key = matches[index][1].trim()
+    const start = matches[index].index + matches[index][0].length
+    const end = index + 1 < matches.length ? matches[index + 1].index : raw.length
+    blocks[key] = raw.slice(start, end).replace(/^\n/, '').replace(/\n$/, '')
+  }
+  return blocks
+}
+function parseGuidedMarkers(raw, schema, keepUnknown) {
+  const out = {}
+  const marker = /<parameter=([^>]+)>/g
+  marker.lastIndex = 0
+  let match
+  while ((match = marker.exec(raw)) !== null) {
+    const key = match[1].trim()
+    const valueStart = match.index + match[0].length
+    const prop = schema.properties?.[key]
+    if (prop === undefined) {
+      if (!keepUnknown) return { value: out, lastIndex: match.index }
+      const next = raw.indexOf('<parameter=', valueStart)
+      const end = next === -1 ? raw.length : next
+      out[key] = raw.slice(valueStart, end).replace(/^\n/, '').replace(/\n$/, '')
+      marker.lastIndex = end
+      continue
+    }
+    if (prop.type === 'object') {
+      const inner = raw.slice(valueStart).replace(/^\n/, '').replace(/\n$/, '')
+      out[key] = hasParameterMarkers(inner) ? parseGuidedMarkers(inner, prop, false).value : inner
+      break
+    }
+    const next = raw.indexOf('<parameter=', valueStart)
+    const end = next === -1 ? raw.length : next
+    let leaf = raw.slice(valueStart, end).replace(/^\n/, '').replace(/\n$/, '')
+    if (hasParameterMarkers(leaf)) {
+      const blocks = parseParameterBlocks(leaf)
+      if (typeof blocks.text === 'string') leaf = blocks.text
+    }
+    if (prop.type === 'array') leaf = leaf.split(/[,，、]/).map(item => item.trim()).filter(Boolean)
+    out[key] = leaf
+    marker.lastIndex = end
+  }
+  return { value: out, lastIndex: marker.lastIndex }
+}
+function rebuildParameterTree(args, schema) {
+  if (typeOf(args) !== 'object' || schema.type !== 'object') return args
+  const out = {}
+  for (const [key, raw] of Object.entries(args)) {
+    const prop = schema.properties[key]
+    if (prop === undefined || typeof raw !== 'string' || !hasParameterMarkers(raw)) { out[key] = raw; continue }
+    if (prop.type === 'object') {
+      out[key] = parseGuidedMarkers(raw, prop, false).value
+    } else if (prop.type === 'string') {
+      const blocks = parseParameterBlocks(raw)
+      out[key] = typeof blocks.text === 'string' ? blocks.text : raw
+    } else if (prop.type === 'array') {
+      out[key] = raw.split(/[,，、]/).map(item => item.trim()).filter(Boolean)
+    } else {
+      out[key] = raw
+    }
+  }
+  return out
 }
 function validate(value, schema, path) {
   const actual = typeOf(value)
@@ -104,7 +176,15 @@ export function readImageToolArguments(call) {
 export function updateSceneDraft(draft, name, args, profile) {
   const tool = SCENE_DRAFT_TOOLS.find(tool => tool.name === name)
   if (!tool) invalid('tool', '未知工具 ' + name)
+  // Nemotron 模板的工具调用是 <parameter=key>value 树；OpenRouter 只拆一层，嵌套标记留在值里。
+  // 先重建嵌套结构，再把模板拍平到顶层的外观字段归位到 fields。
+  if (Object.values(args).some(hasParameterMarkers)) args = rebuildParameterTree(args, tool.parameters)
   if (name === SCENE_CHARACTER_TOOL.name) {
+    const strayVisuals = fields.filter(key => key !== 'fields' && args[key] !== undefined)
+    if (strayVisuals.length) {
+      args.fields = { ...(typeOf(args.fields) === 'object' ? args.fields : {}), ...Object.fromEntries(strayVisuals.map(key => [key, args[key]])) }
+      for (const key of strayVisuals) delete args[key]
+    }
     if (typeof args.fields === 'string') {
       const parsed = coerceObjectArg(args.fields)
       args.fields = typeOf(parsed) === 'object' ? parsed : { appearance: coerceVisual(args.fields) }
