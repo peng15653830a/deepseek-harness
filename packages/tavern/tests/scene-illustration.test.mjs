@@ -981,7 +981,7 @@ test('format repair happens before image request; a saved plan survives failed f
     assert.deepEqual(input.tools.map(tool => tool.name), ['submit_scene_character', 'submit_scene_layout', 'submit_scene_plan', 'character_design_read'])
     assert.equal(input.maxToolCalls, 14)
     const error = await submitPlanCall(input, { arguments: { plan: { prompt: 'not the schema' } } })
-    assert.match(error, /未知字段.*尚未请求图片.*剩余修正机会：3/)
+    assert.match(error, /缺失.*尚未请求图片.*剩余修正机会：3/)
     assert.equal(fx.imageCalls(), 0)
     assert.equal(input.stopToolsWhen(), false)
     const result = await submitPlanCall(input, { arguments: { plan: planFixture() } })

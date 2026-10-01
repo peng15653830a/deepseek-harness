@@ -41,7 +41,8 @@ function validate(value, schema, path) {
     value.forEach((item, index) => validate(item, schema.items, path + '[' + index + ']'))
   }
   if (schema.type === 'object') {
-    for (const key of Object.keys(value)) if (!Object.hasOwn(schema.properties, key)) invalid(path, '包含未知字段 ' + key)
+    // 本地模型常携带模式外字段（如 expression）；剥离即可，声明的字段仍严格校验。
+    for (const key of Object.keys(value)) if (!Object.hasOwn(schema.properties, key)) delete value[key]
     for (const key of schema.required) if (!Object.hasOwn(value, key)) invalid(path + '.' + key, '缺失')
     for (const [key, item] of Object.entries(value)) validate(item, schema.properties[key], path + '.' + key)
   }
