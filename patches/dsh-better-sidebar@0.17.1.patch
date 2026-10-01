@@ -10,8 +10,10 @@ diff --git a/lib/index.js b/lib/index.js
 diff --git a/lib/client.js b/lib/client.js
 --- a/lib/client.js
 +++ b/lib/client.js
-@@ -10437,0 +10438 @@
+@@ -10438 +10438,2 @@
+-				name: "conversation.chat.turnTail",
 +				id: "dsh-better-sidebar",
++				name: "conversation.chat.turnTail",
 diff --git a/package.json b/package.json
 --- a/package.json
 +++ b/package.json
