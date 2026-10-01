@@ -33,8 +33,25 @@ test('按调用 id 取回 DSH 原始参数，不读取上次调用或历史任�
   assert.throws(() => readImageToolArguments(call), /JSON 语法错误/)
   assert.equal(imageToolCall('submit_scene_character', {}, { callId: 'old' }, events, 1).rawArguments, undefined)
 })
-test('已解析参数、JSON 字符串和错误根类型严格区分，不静默修复', () => {
+test('已解析参数、JSON 字符串和错误根类型严格区分；无参工具的多余字段剥离', () => {
   assert.deepEqual(readImageToolArguments({ arguments: '{"id":"a"}' }), { id: 'a' })
   assert.throws(() => readImageToolArguments({ arguments: [] }), /参数内容错误.*object.*array/)
-  assert.throws(() => updateSceneDraft({}, 'submit_scene_plan', { plan: {} }), /未知字段.*plan/)
+  assert.deepEqual(updateSceneDraft({}, 'submit_scene_plan', { plan: {} }), { characters: {}, layout: null })
+})
+test('scene 手写 JSON 多打闭合括号：逐段抢救合并，不把整段原文塞进 environment', () => {
+  const stuttered = '{"environment": {"text": "客厅落地窗外是海面", "tags": "living room, ocean view"}}, "composition": {"text": "中景仰视构图", "tags": "medium shot, low angle"}}'
+  const draft = updateSceneDraft({}, 'submit_scene_layout', { description: '母女并立', subjects: ['a'], continuity: 'changed', scene: stuttered })
+  assert.equal(draft.layout.scene.environment.text, '客厅落地窗外是海面')
+  assert.equal(draft.layout.scene.environment.tags, 'living room, ocean view')
+  assert.equal(draft.layout.scene.composition.text, '中景仰视构图')
+  assert.equal(draft.layout.scene.composition.tags, 'medium shot, low angle')
+})
+test('fields 手写 JSON 单个多余括号同样抢救', () => {
+  const stuttered = '{"appearance": {"text": "黑发", "tags": "black hair"}}}'
+  const draft = updateSceneDraft({}, 'submit_scene_character', { id: 'a', name: '甲', fields: stuttered })
+  assert.equal(draft.characters.a.fields.appearance.text, '黑发')
+})
+test('超长字段报错带实际长度', () => {
+  assert.throws(() => updateSceneDraft({}, 'submit_scene_layout',
+    { description: '长'.repeat(1001), subjects: ['a'], continuity: 'changed', scene: {} }), /超过 1000 字符（实际 1001）/)
 })

@@ -47,9 +47,37 @@ const coerceObjectArg = value => {
   if (typeof value !== 'string') return value
   const trimmed = value.trim()
   if (trimmed.startsWith('{')) {
-    try { const parsed = JSON.parse(trimmed); if (typeOf(parsed) === 'object') return parsed } catch { /* bare prose below */ }
+    try { const parsed = JSON.parse(trimmed); if (typeOf(parsed) === 'object') return parsed } catch { /* stuttered braces below */ }
+    return salvageStutteredObject(trimmed)
   }
   return null
+}
+/** 手写嵌套 JSON 常多打紧挨的闭合大括号（口吃，如 {"a":1}},"b":2}}），整体解析必然失败；
+ *  只删字符串外的相邻多余 } 逐层重试，结构天然保持。实例来自真实日志：scene 整段原文被兜底
+ *  塞进 environment.text，报"超过 600 字符"，模型压缩三次也无效，烧光修正额度。 */
+function salvageStutteredObject(trimmed, budget = 2) {
+  try { const parsed = JSON.parse(trimmed); if (typeOf(parsed) === 'object') return parsed } catch { /* 口吃括号，逐层删除重试 */ }
+  if (budget <= 0) return null
+  for (const candidate of adjacentCloseDeletions(trimmed)) {
+    const salvaged = salvageStutteredObject(candidate, budget - 1)
+    if (salvaged) return salvaged
+  }
+  return null
+}
+function adjacentCloseDeletions(text) {
+  const candidates = []
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const ch = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+    } else if (ch === '"') inString = true
+    else if (ch === '}' && text[index + 1] === '}') candidates.push(text.slice(0, index) + text.slice(index + 1))
+  }
+  return candidates
 }
 /** Nemotron 模板的工具调用是 <parameter=key>value 树；OpenRouter 只拆一层，嵌套标记留在值里。
  *  按 schema 引导解析：对象的子标记递归归位，字符串标记解出 text，未知键保留（交由拍平归位）或交还上层。 */
@@ -123,7 +151,7 @@ function validate(value, schema, path) {
   const actual = typeOf(value)
   if (actual !== schema.type) invalid(path, '应为 ' + schema.type + '，实际为 ' + actual)
   if (schema.enum && !schema.enum.includes(value)) invalid(path, '须为 ' + schema.enum.join(' / '))
-  if (schema.type === 'string' && value.length > schema.maxLength) invalid(path, '超过 ' + schema.maxLength + ' 字符')
+  if (schema.type === 'string' && value.length > schema.maxLength) invalid(path, '超过 ' + schema.maxLength + ' 字符（实际 ' + value.length + '）')
   if (schema.type === 'array') {
     if (value.length > schema.maxItems) invalid(path, '最多 ' + schema.maxItems + ' 项')
     value.forEach((item, index) => validate(item, schema.items, path + '[' + index + ']'))
