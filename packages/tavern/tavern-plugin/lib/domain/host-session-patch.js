@@ -1,6 +1,6 @@
 // In-memory host/client patch for DSH 0.2.0-rc.2. Official package files stay unchanged.
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -244,21 +244,40 @@ function hostRequireFrom(anchor) {
 // The plugin file lives in this repo. The running host packages live next to
 // the dsh launcher. Pick the copy that actually constructed the live store.
 async function defaultHostRequire(persistence) {
-  const anchors = [fileURLToPath(new URL('../../package.json', import.meta.url))]
+  const anchors = []
+  // The 0.2 desktop host passes its runtime project as argv[2]; its @deepseek-ai/dsh
+  // install anchor resolves the same workspace copies the running services use.
+  // The plugin's own anchor may hit a .pnpm store copy whose classes fail instanceof.
+  if (process.argv[2] && !String(process.argv[2]).endsWith('.js')) {
+    try { anchors.push(join(process.argv[2], 'node_modules', '@deepseek-ai', 'dsh', 'package.json')) } catch { /* fall through */ }
+  }
+  anchors.push(fileURLToPath(new URL('../../package.json', import.meta.url)))
   if (process.argv[1]) anchors.push(process.argv[1])
   const found = []
   const errors = []
+  // The plugin's own node_modules links the session packages directly to the
+  // workspace copies; hostRequireFrom's dsh-tools hop walks upward instead and
+  // lands on the hoisted .pnpm store copy, whose classes fail instanceof.
+  try { found.push(createRequire(fileURLToPath(new URL('../../package.json', import.meta.url)))) }
+  catch (error) { errors.push(error) }
   for (const anchor of anchors) {
     try { found.push(hostRequireFrom(anchor)) }
     catch (error) { errors.push(error) }
   }
   if (!found.length) throw errors.at(-1) || new Error('无法解析宿主包')
   if (!persistence) return found[0]
+  // 0.2 的 realm 包装会把服务包成代理；instanceof 要穿透到原始实例。
+  const rawPersistence = persistence?.[Symbol.for('cordis.original')] ?? persistence
+  const diagnosis = []
   for (const candidate of found) {
-    const loaded = await import(pathToFileURL(candidate.resolve('@deepseek-ai/dsh-session-persistence')).href)
-    if (Object.values(loaded).some(exported => typeof exported === 'function' && persistence instanceof exported)) return candidate
+    let loaded
+    try { loaded = await import(pathToFileURL(candidate.resolve('@deepseek-ai/dsh-session-persistence')).href) }
+    catch (error) { diagnosis.push('import失败: ' + (error.message || error)); continue }
+    const matched = Object.entries(loaded).some(([name, exported]) => typeof exported === 'function' && rawPersistence instanceof exported)
+    diagnosis.push(candidate.resolve('@deepseek-ai/dsh-session-persistence') + ' -> ' + (matched ? '匹配' : '不匹配(实例构造器: ' + String(rawPersistence?.constructor?.name) + ')'))
+    if (matched) return candidate
   }
-  throw new Error('解析到的宿主包与正在运行的会话存储不是同一份')
+  throw new Error('解析到的宿主包与正在运行的会话存储不是同一份 | ' + diagnosis.join(' | '))
 }
 
 function runtimeRoot(sessionFile) {
@@ -359,7 +378,12 @@ export async function installHostSessionPatch({ hostRequire, persistence, query 
   }
   let patch
   try {
-    patch = await prepareExpandedPatch(runtimeRoot(require.resolve('@deepseek-ai/dsh-session')), { version: SESSION_PATCH_VERSION })
+    // The desktop host passes its runtime project as argv[2]; compiling from there
+    // keeps every patched copy on the same workspace files the live services use.
+    const runtime = process.argv[2] && existsSync(join(process.argv[2], 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+      ? process.argv[2]
+      : runtimeRoot(require.resolve('@deepseek-ai/dsh-session'))
+    patch = await prepareExpandedPatch(runtime, { version: SESSION_PATCH_VERSION })
     patch.patchPersistence(persistence)
     patch.patchQuery(query)
   } catch (error) {
