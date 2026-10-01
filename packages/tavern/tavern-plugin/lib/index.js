@@ -3437,6 +3437,10 @@ export async function apply(ctx) {
       kind: 'prefix',
       path: '/api/dsh-tavern',
       handler: async (req, res) => {
+        // 本前缀比 connection 的 /api 更具体，核心围栏不会经过；在此执行同一份
+        // Host 围栏与浏览器认证，插件自身不再维护 Origin 白名单。
+        const rejection = ctx.get('connection')?.requestRejection({ headers: req.headers })
+        if (rejection !== undefined) { res.writeHead(rejection); res.end(rejection === 401 ? 'dsh web authentication required; reopen the URL printed by dsh web.\n' : 'forbidden'); return }
         const pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname)
         const cachedAssetMatch = /^\/api\/dsh-tavern\/remote-assets\/([0-9a-f]{64})(?:\/[^/]*)?$/i.exec(pathname)
         const readsStaticAsset = req.method === 'GET' && pathname === '/api/dsh-tavern/static-assets'
@@ -3444,30 +3448,9 @@ export async function apply(ctx) {
         const readsOfficialMvu = req.method === 'GET' && pathname === OFFICIAL_MVU_VERSION.assetUrl
         const readsRuntimeAsset = req.method === 'GET' && pathname.startsWith(TAVERN_RUNTIME_ASSET_PREFIX)
         const readsClientAsset = req.method === 'GET' && pathname.startsWith(TAVERN_CLIENT_ASSET_PREFIX)
-        const origin = req.headers.origin
         const gameplayRoute = pathname.startsWith('/api/dsh-tavern/gameplay.')
-        if (gameplayRoute && origin && origin !== 'http://' + req.headers.host && origin !== 'https://' + req.headers.host) {
-          res.writeHead(403); res.end('forbidden'); return
-        }
         const sceneImageRoute = TAVERN_RELEASE_CAPABILITIES.sceneImages && /^\/api\/dsh-tavern\/(?:scene-image|getSceneImageSettings|saveSceneImageSettings|testSceneImageConnection|listSceneImageModels|sceneImageStatus|recordSceneImageInteraction|generateSceneImage|retrySceneImageSave|cancelSceneImage|removeSceneImage|setSceneImageReference)$/.test(pathname)
-        const sceneSameOrigin = sceneImageRoute && (origin === 'http://' + req.headers.host || origin === 'https://' + req.headers.host)
-        if (sceneImageRoute && origin && !sceneSameOrigin) {
-          res.writeHead(403)
-          res.end('forbidden')
-          return
-        }
         const readsCachedAsset = req.method === 'GET' && cachedAssetMatch
-        const localOrOpaqueOrigin = origin === undefined || origin === '' || origin === 'null' || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
-        if (readsStaticAsset && !localOrOpaqueOrigin) {
-          res.writeHead(403)
-          res.end('forbidden')
-          return
-        }
-        if (!readsCachedAsset && !readsStaticAsset && !readsOfficialMvu && !readsFullTemplate && !readsRuntimeAsset && !readsClientAsset && !sceneSameOrigin && typeof origin === 'string' && origin !== '' && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
-          res.writeHead(403)
-          res.end('forbidden')
-          return
-        }
         if (req.method === 'GET' && pathname === '/api/dsh-tavern/runtime-generation') {
           res.writeHead(200, {
             'Content-Type': 'application/json; charset=utf-8',
