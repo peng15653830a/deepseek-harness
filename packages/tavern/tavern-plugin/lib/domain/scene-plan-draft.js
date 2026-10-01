@@ -31,6 +31,22 @@ export function proseTagProblem(profile, tags) {
   return cjk.test(tags) ? '' : '当前工作流要求中文自然语言 tags，不能只写英文标签'
 }
 function invalid(path, message) { throw new Error('参数内容错误：' + path + ' ' + message) }
+/** Weak local models emit nested objects as bare prose or JSON strings; coerce the common shapes before validation. */
+const coerceVisual = value => {
+  if (typeof value === 'string') return { text: value, tags: value }
+  if (typeOf(value) !== 'object') return value
+  const text = typeof value.text === 'string' ? value.text : ''
+  const tags = typeof value.tags === 'string' ? value.tags : (value.tags === undefined && text !== '' ? text : value.tags)
+  return { text, tags }
+}
+const coerceObjectArg = value => {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (trimmed.startsWith('{')) {
+    try { const parsed = JSON.parse(trimmed); if (typeOf(parsed) === 'object') return parsed } catch { /* bare prose below */ }
+  }
+  return null
+}
 function validate(value, schema, path) {
   const actual = typeOf(value)
   if (actual !== schema.type) invalid(path, '应为 ' + schema.type + '，实际为 ' + actual)
@@ -88,6 +104,28 @@ export function readImageToolArguments(call) {
 export function updateSceneDraft(draft, name, args, profile) {
   const tool = SCENE_DRAFT_TOOLS.find(tool => tool.name === name)
   if (!tool) invalid('tool', '未知工具 ' + name)
+  if (name === SCENE_CHARACTER_TOOL.name) {
+    if (typeof args.fields === 'string') {
+      const parsed = coerceObjectArg(args.fields)
+      args.fields = typeOf(parsed) === 'object' ? parsed : { appearance: coerceVisual(args.fields) }
+    }
+    if (typeOf(args.fields) === 'object') for (const [key, item] of Object.entries(args.fields)) args.fields[key] = coerceVisual(item)
+    if (typeof args.expressions === 'string') {
+      const parsed = coerceObjectArg(args.expressions)
+      if (typeOf(parsed) === 'object') args.expressions = parsed; else delete args.expressions
+    }
+  } else if (name === SCENE_LAYOUT_TOOL.name) {
+    if (typeof args.scene === 'string') {
+      const parsed = coerceObjectArg(args.scene)
+      args.scene = typeOf(parsed) === 'object' ? parsed : { environment: coerceVisual(args.scene) }
+    }
+    if (typeof args.subjects === 'string') args.subjects = args.subjects.split(/[,，、]/).map(item => item.trim()).filter(Boolean)
+    if (typeOf(args.scene) === 'object') for (const [key, item] of Object.entries(args.scene)) args.scene[key] = coerceVisual(item)
+    if (typeof args.expressions === 'string') {
+      const parsed = coerceObjectArg(args.expressions)
+      if (typeOf(parsed) === 'object') args.expressions = parsed; else delete args.expressions
+    }
+  }
   validate(args, tool.parameters, name)
   const next = structuredClone({ characters: {}, layout: null, ...draft })
   if (name === SCENE_CHARACTER_TOOL.name) {
