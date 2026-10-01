@@ -65,11 +65,17 @@ async function stopRunningShell() {
   await new Promise(settle => setTimeout(settle, 1500))
 }
 
-/** Mount the Tavern bundles in the freshly generated disposable profile. */
+/** The Harness home the launched shell resolves, and its desktop profile directory. */
+function tavernHome() {
+  return resolve(process.env.DSH_HOME ?? join(DEVELOPMENT_ROOT, 'home'))
+}
+
+/** Mount the Tavern bundles in the durable home profile the Host actually boots. */
 function mountTavernBundles() {
-  // 0.2 boots the Host from the durable home profile, not the regenerated
-  // runtime project: the project only anchors package resolution.
-  const profileDir = join(DEVELOPMENT_ROOT, 'home', 'profiles', 'desktop')
+  // 0.2 boots the Host from the durable home profile (resolveDshHome()/
+  // profiles/desktop), not the regenerated runtime project: the project only
+  // anchors package resolution.
+  const profileDir = join(tavernHome(), 'profiles', 'desktop')
   mkdirSync(profileDir, { recursive: true })
   const manifestPath = join(profileDir, 'package.json')
   const manifest = existsSync(manifestPath)
@@ -96,7 +102,7 @@ async function launchElectron() {
   const electron = electronExecutable()
   const environment = {
     ...process.env,
-    DSH_HOME: resolve(process.env.DSH_HOME ?? join(DEVELOPMENT_ROOT, 'home')),
+    DSH_HOME: tavernHome(),
     DSH_DESKTOP_PRIMARY_RUNTIME_DIR: process.env.DSH_DESKTOP_PRIMARY_RUNTIME_DIR ?? developmentRuntimeDirectory(),
     DSH_DESKTOP_HOST_INSPECT_PORT: process.env.DSH_DESKTOP_HOST_INSPECT_PORT ?? '9230',
     DSH_DESKTOP_NODE_BINARY: process.execPath,
