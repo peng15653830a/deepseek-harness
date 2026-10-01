@@ -39,7 +39,7 @@
     "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "acorn": "8.15.0",
     "chevrotain": "^11.2.0",
-    "dsh-better-sidebar": "0.17.1",
+    "dsh-better-sidebar": "0.24.1",
     "dsh-tavern-remote": "workspace:^",
     "dsh-web-mobile": "2.3.0",
     "ejs": "3.1.9",

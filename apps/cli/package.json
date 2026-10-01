@@ -93,7 +93,7 @@
     "@deepseek-ai/dsh-workflow-ptc": "workspace:*",
     "@deepseek-ai/schemastery": "workspace:~",
     "commander": "^15.0.0",
-    "dsh-better-sidebar": "0.17.1",
+    "dsh-better-sidebar": "0.24.1",
     "dsh-tavern-plugin": "workspace:^",
     "dsh-tavern-remote": "workspace:^",
     "dsh-web-mobile": "2.3.0",
