@@ -34,7 +34,12 @@ export function rewindBackgroundSurface(session, boundary) {
       break
     }
   }
-  if (source === null) throw new Error('后台 Agent checkpoint 之后存在消息，但找不到可用的模型来源')
+  if (source === null) {
+    // 后台会话还没有任何成功的模型回复可作锚点（例如首个任务遇上游过载，assistant
+    // 消息从未落盘）。抛错会让结算从此永久失败、自动配图停摆；保留现场直接续跑，
+    // 首次成功写入 assistant/message 后，后续回退即恢复正常抑制。
+    return 0
+  }
   for (const shadowed of groups) replaceSessionSurface(session, 'assistant/message', {
     turn,
     step,

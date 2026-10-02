@@ -46,3 +46,18 @@ test('V3 reset preserves replaced system head and fixed prefix in surface order'
   assert.equal(rewindBackgroundSurface(session, -1), 4)
   assert.deepEqual(writes, [{ surfaceOp: { op: 'replace', start: 11, end: 17 }, sourceEventSeqs: [11, 12, 15, 17] }])
 })
+
+test('首个任务失败且 assistant 消息从未落盘时保留现场续跑，不把结算打死', () => {
+  // 真实日志脱敏：上游过载导致 turn 报错结束，日志里只有 system/user 消息，没有任何 assistant 消息。
+  const writes = []
+  const session = { events: [
+    { seq: 4, type: 'system/message', data: { turn: 1, step: 1, message: { id: 'tavern-system-head:bg', role: 'system', content: [], source: { kind: 'system-prompt' } } } },
+    { seq: 5, type: 'user/message', data: { id: 'tavern-session-prefix:bg', role: 'user', content: [], source: { kind: 'dsh-tavern' } } },
+    { seq: 10, type: 'system/message', data: { turn: 1, step: 1, message: { role: 'system', content: [{ type: 'text', text: '【常驻世界书】' }] } } },
+    { seq: 11, type: 'user/message', data: { id: 'task-1', role: 'user', content: [{ type: 'text', text: '【最近剧情与本次任务】' }] } },
+    { seq: 15, type: 'assistant/attempt', data: { turn: 1, step: 1, stream: [] } },
+    { seq: 17, type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { message: 'Upstream error from Nvidia: Service temporarily overloaded' } } } }
+  ], surface: { nodes: [4, 5, 10, 11, 15, 17] }, append(type, data, options) { writes.push(options) } }
+  assert.equal(rewindBackgroundSurface(session, 5), 0)
+  assert.deepEqual(writes, [])
+})
