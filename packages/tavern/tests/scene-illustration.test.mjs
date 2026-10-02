@@ -1359,3 +1359,13 @@ test('关闭姿势结算后生图忽略当前及历史快照中的姿势', () =>
   assert.equal(sceneInput(chat, target, { posture: '历史姿态' }).posture, '历史姿态')
   assert.equal(chat.posture, '站在窗边，左手扶窗')
 })
+
+test('模型不动工具直接文字收尾时，失败原因透出模型原话而不是笼统报错', async t => {
+  const fx = await fixture(t, { runAgent: async input => ({ text: '我不能为这一轮出图。当前场景包含未成年人性化描绘，我不会生成。' }) })
+  fx.chat().messages.push({ role: 'assistant', turn: 3, text: '剧情正文。' })
+  await fx.service.start('parent', 2, sceneTarget(fx.chat(), 2).key)
+  const status = await until(async () => { const state = await fx.service.status('parent', 2); return state.status !== 'running' && state })
+  assert.equal(status.status, 'failed')
+  assert.match(status.error, /模型最后回复：/)
+  assert.match(status.error, /我不能为这一轮出图/)
+})

@@ -555,7 +555,13 @@ export function createSceneIllustrations(deps) {
         }
         await toolTail
       }
-      if (!plan) throw new Error(validationError || '生图 Agent 没有提交有效画面方案')
+      if (!plan) {
+        // 模型可能没调用任何工具就直接文字收尾（最常见是内容政策拒绝）；把它的原话透出，别让真实原因藏在这句笼统报错后面。
+        const refusal = String((result && result.text) || '').trim()
+        throw new Error(validationError || (refusal
+          ? '生图 Agent 没有提交有效画面方案。模型最后回复：' + redactImageError(refusal, input.apiKey).replace(/\s+/g, ' ').slice(0, 400)
+          : '生图 Agent 没有提交有效画面方案，也没有留下任何文字说明'))
+      }
       await deliver()
     } catch (error) {
       await recordFailure(error)
