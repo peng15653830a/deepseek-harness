@@ -1398,7 +1398,7 @@ window.__ModuleLoader__.load({
 			return '<!doctype html><html><head><meta charset="utf-8">'
 				+ '<meta name="viewport" content="width=device-width,initial-scale=1">'
 				+ '<meta name="referrer" content="no-referrer">'
-				+ '<meta http-equiv="Content-Security-Policy" content="default-src https: http: data: blob:; img-src https: http: data: blob:; media-src https: http: data: blob:; style-src \'unsafe-inline\' https: http:; font-src https: http: data:; script-src \'unsafe-inline\' \'unsafe-eval\' https: http: data: blob:; connect-src https: http: ws: wss: data: blob:; frame-src https: http: data: blob:; form-action https: http:">'
+				+ '<meta http-equiv="Content-Security-Policy" content="default-src https: http: dsh-app: data: blob:; img-src https: http: dsh-app: data: blob:; media-src https: http: dsh-app: data: blob:; style-src \'unsafe-inline\' https: http: dsh-app:; font-src https: http: dsh-app: data:; script-src \'unsafe-inline\' \'unsafe-eval\' https: http: dsh-app: data: blob:; connect-src https: http: dsh-app: ws: wss: data: blob:; frame-src https: http: dsh-app: data: blob:; form-action https: http: dsh-app:">'
 				+ '<base target="_blank">'
 				+ '<style>html,body{margin:0;min-height:100%;background:#fff;color:#1f2328;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{box-sizing:border-box;padding:16px}.dsh-tavern-greeting-text,.dsh-tavern-preserve-lines{white-space:pre-wrap;overflow-wrap:anywhere}.dsh-tavern-greeting-text{font-size:14px;line-height:1.7}img,video{max-width:100%;height:auto}</style>'
 				+ tavernIconDependencies() + tavernStaticAssetShim() + '</head><body>' + content + preserveMixedTextLines + '</body></html>';
@@ -1586,7 +1586,7 @@ window.__ModuleLoader__.load({
 			return '<!doctype html><html><head><meta charset="utf-8">'
 				+ '<meta name="viewport" content="width=device-width,initial-scale=1">'
 				+ '<meta name="referrer" content="no-referrer">'
-				+ '<meta http-equiv="Content-Security-Policy" content="default-src https: http: data: blob:; img-src https: http: data: blob:; media-src https: http: data: blob:; font-src https: http: data:; style-src \'unsafe-inline\' https: http:; script-src \'unsafe-inline\' \'unsafe-eval\' https: http: data: blob:; connect-src https: http: wss: data: blob:; frame-src https: http: data: blob:; object-src \'none\'; base-uri \'none\'; form-action \'none\'">'
+				+ '<meta http-equiv="Content-Security-Policy" content="default-src https: http: dsh-app: data: blob:; img-src https: http: dsh-app: data: blob:; media-src https: http: dsh-app: data: blob:; font-src https: http: dsh-app: data:; style-src \'unsafe-inline\' https: http: dsh-app:; script-src \'unsafe-inline\' \'unsafe-eval\' https: http: dsh-app: data: blob:; connect-src https: http: dsh-app: wss: data: blob:; frame-src https: http: dsh-app: data: blob:; object-src \'none\'; base-uri \'none\'; form-action \'none\'">'
 				+ '<style>:root{color-scheme:light dark}html,body{box-sizing:border-box;margin:0;min-height:0;background:transparent;color:CanvasText;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;line-height:1.75}body{padding:0 1px;overflow-wrap:anywhere;white-space:pre-wrap}html[data-dsh-tavern-scroll]{overflow-y:auto!important}html[data-dsh-tavern-scroll] body{overflow-y:visible!important}body>*{white-space:normal}maintext{display:block;white-space:pre-wrap;overflow-wrap:anywhere}.dsh-tavern-plain-text{white-space:pre-wrap;overflow-wrap:anywhere}*,*:before,*:after{box-sizing:border-box}img,video,svg,canvas{max-width:100%;height:auto}pre{max-width:100%;overflow:auto;white-space:pre-wrap}table{max-width:100%;border-collapse:collapse}a{color:LinkText}</style>' + (preparationRuntime ? preparationRuntime.head : helperDependencies) + tavernStaticAssetShim() + '<script data-dsh-tavern-remote-document>(' + installTavernRemoteDocumentLoader.toString() + ')();<\/script>' + storageShim + helperShim + interactiveHelperShim + mvuViewObservationShim + cleanRuntimeReporter
 				+ (input && input.helperContext && input.helperContext.openingHost ? '<script data-dsh-tavern-session-opening>(' + installSessionOpeningBridge.toString() + ')(' + token + ',' + JSON.stringify(Object.assign({}, input.helperContext.openingHost, { extensionSettings: input.helperContext.extensionSettings || {} })).replace(/</g, '\\u003c') + ');<\/script>' : '')
 				+ (input && input.helperContext ? '<script data-dsh-tavern-frame-variable-aliases>(' + installTavernFrameVariableAliases.toString() + ')();<\/script>' : '')
@@ -3298,7 +3298,7 @@ window.__ModuleLoader__.load({
         function buildTavernHelperScriptDocument(input) {
 			const parts = buildTavernHelperScriptParts(input);
 			return '<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
-				+ '<meta http-equiv="Content-Security-Policy" content="default-src https: http: data: blob:; script-src \'unsafe-inline\' \'unsafe-eval\' https: http: data: blob:; connect-src https: http: wss: data: blob:; img-src https: http: data: blob:; style-src \'unsafe-inline\' https: http:; object-src \'none\'; base-uri \'none\'; form-action \'none\'">'
+				+ '<meta http-equiv="Content-Security-Policy" content="default-src https: http: dsh-app: data: blob:; script-src \'unsafe-inline\' \'unsafe-eval\' https: http: dsh-app: data: blob:; connect-src https: http: dsh-app: wss: data: blob:; img-src https: http: dsh-app: data: blob:; style-src \'unsafe-inline\' https: http: dsh-app:; object-src \'none\'; base-uri \'none\'; form-action \'none\'">'
 				+ parts.head + '</head><body>' + parts.body + '</body></html>';
         }
 
@@ -5332,6 +5332,73 @@ window.__ModuleLoader__.load({
 			});
 		})();
 
+		// Tavern's conversation surface belongs to Sessions that keep a Tavern agent
+		// preset. Session-scoped registrations pass through this gate, which installs
+		// them only while such a Session is on screen; a Session switched to another
+		// preset renders through the host's own slot entries instead.
+		function createTavernPresetUiGate() {
+			const wanted = new Map();
+			let active = false;
+			function disposeRegistration(disposer) {
+				if (typeof disposer !== "function") return;
+				try { disposer(); } catch (error) { console.warn("dsh-tavern: 酒馆会话界面注销失败", error); }
+			}
+			return Object.freeze({
+				add: function (thunk) {
+					wanted.set(thunk, active ? thunk() : undefined);
+					return function () {
+						const disposer = wanted.get(thunk);
+						wanted.delete(thunk);
+						disposeRegistration(disposer);
+					};
+				},
+				setActive: function (next) {
+					if (next === active) return;
+					active = next;
+					for (const entry of Array.from(wanted.entries())) {
+						const thunk = entry[0];
+						const disposer = entry[1];
+						if (active && disposer === undefined) wanted.set(thunk, thunk());
+						else if (!active && disposer !== undefined) {
+							wanted.set(thunk, undefined);
+							disposeRegistration(disposer);
+						}
+					}
+				}
+			});
+		}
+
+		// Route every session-scoped slot registration of one feature module through the gate.
+		function tavernGatedSlots(slots, gate) {
+			return Object.freeze({
+				inject: function (name, factory) { return gate.add(function () { return slots.inject(name, factory); }); },
+				register: function () { return slots.register.apply(slots, arguments); }
+			});
+		}
+
+		const EMPTY_TAVERN_SESSION_LIST = Object.freeze({ ids: [], byId: {} });
+		function inactiveTavernSessionList() { return EMPTY_TAVERN_SESSION_LIST; }
+		function noTavernSessionListSubscription() { return function () {}; }
+
+		function TavernPresetUiGate(props) {
+			const gate = props.gate;
+			const list = props.sessions && props.sessions.list;
+			const subscribe = list && typeof list.subscribe === "function"
+				? function (listener) { return list.subscribe(listener); }
+				: noTavernSessionListSubscription;
+			const snapshot = list && typeof list.getSnapshot === "function"
+				? function () { return list.getSnapshot(); }
+				: inactiveTavernSessionList;
+			const state = React.useSyncExternalStore(subscribe, snapshot);
+			const summary = state && state.byId ? state.byId[props.sessionId] : undefined;
+			const preset = summary && summary.projectionValues ? summary.projectionValues.agentPreset : undefined;
+			// Only a positively recorded non-Tavern preset hands the Session to the host;
+			// a missing projection keeps the Tavern surface instead of flashing it away.
+			const tavern = !(typeof preset === "string" && preset.length > 0 && preset.indexOf("tavern") !== 0);
+			React.useEffect(function () { gate.setActive(tavern); });
+			return null;
+		}
+
 		function createTavernAssistantRendererFeatureModule() {
 			function TavernUserNodeView(props) {
 				const data = props.node.data;
@@ -5359,8 +5426,8 @@ window.__ModuleLoader__.load({
 				const time = Number.isFinite(Number(data.time)) ? new Date(Number(data.time)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
 				return React.createElement("div", { className: "dsh-tavern-user-row" },
 					React.createElement("div", { className: "dsh-tavern-user-stack" }, renderedImages, (text !== "" || extras.length > 0) ? React.createElement("div", { className: "dsh-tavern-user-bubble" }, React.createElement(DshUi.MarkdownText, { text: text, labels: TAVERN_MARKDOWN_LABELS }), extras) : null),
-					React.createElement("div", { className: "dsh-tavern-user-stack" }, renderedImages, (text !== "" || extras.length > 0) ? React.createElement("div", { className: "dsh-tavern-user-bubble" }, liveState.view?.inputTemplateDisplays?.[turn] ? React.createElement(TavernMessageFrame, {content:liveState.view.inputTemplateDisplays[turn],sessionId:props.sessionId,turn:turn,partIndex:"user-template",frameOwner:props.frameOwner,eager:true}) : React.createElement(DshUi.MessageText, { text: text }), extras) : null),
-					React.createElement("div", { className: "dsh-tavern-user-actions" }, time ? React.createElement("span", null, time) : null, React.createElement(DshUi.Tooltip, { label: copied ? "已复制" : "复制", side: "bottom" }, React.createElement("button", { type: "button", className: "dsh-tavern-user-copy", "aria-label": copied ? "已复制" : "复制", onClick: copy }, React.createElement(copied ? DshUi.IconCheckOutline16 : DshUi.IconCopyOutline16, null))))
+					React.createElement("div", { className: "dsh-tavern-user-stack" }, renderedImages, (text !== "" || extras.length > 0) ? React.createElement("div", { className: "dsh-tavern-user-bubble" }, liveState.view?.inputTemplateDisplays?.[turn] ? React.createElement(TavernMessageFrame, {content:liveState.view.inputTemplateDisplays[turn],sessionId:props.sessionId,turn:turn,partIndex:"user-template",frameOwner:props.frameOwner,eager:true}) : React.createElement(DshUi.MarkdownText, { text: text, labels: TAVERN_MARKDOWN_LABELS }), extras) : null),
+					React.createElement("div", { className: "dsh-tavern-user-actions" }, time ? React.createElement("span", null, time) : null, React.createElement(DshUi.Tooltip, { label: copied ? "已复制" : "复制", side: "bottom" }, React.createElement("button", { type: "button", className: "dsh-tavern-user-copy", "aria-label": copied ? "已复制" : "复制", onClick: copy }, React.createElement(copied ? DshUi.IconCheckOutlineRegular : DshUi.IconCopyOutlineRegular, null))))
 				);
 			}
 			function openSceneImagePreview(url, opener) {
@@ -5570,7 +5637,7 @@ window.__ModuleLoader__.load({
 				}
 				return React.createElement(DshUi.Tooltip, { label: forking ? "正在分叉…" : "从这一轮分叉", side: "bottom" },
 					React.createElement("button", { type: "button", className: "dsh-tavern-message-fork", "aria-label": "从这一轮分叉", disabled: forking, onClick: fork },
-						React.createElement(DshUi.IconBranchOutline16, null)));
+						React.createElement(DshUi.IconBranchOutlineRegular, null)));
 			}
 			function register(input) {
 				const scriptOwner = createTavernScriptSessionOwner({ sessions: input.ctx.sessions, executeSlash: createTavernFrameSlashExecutor(input.ctx) });
@@ -10514,10 +10581,17 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => syncTavernSubagentCatalogs(ctx.sessions), "dsh-tavern: subagent catalog synchronization");
 			const slots = ctx.slots;
 			if (slots === undefined) return;
-            ctx.effect(() => slots.inject("conversation.view", () => slots.register({
+			const tavernPresetUi = createTavernPresetUiGate();
+			const sessionScopedSlots = tavernGatedSlots(slots, tavernPresetUi);
+			// The gate itself stays registered for every Session: it reports the preset of
+			// whatever Session is on screen and installs or retires the Tavern surface.
+			ctx.effect(() => slots.inject("conversation.input.dock", () => slots.register(
+				{ name: "conversation.input.dock", id: "dsh-tavern-preset-gate", order: 900, label: "酒馆会话界面" },
+				function (props) { return React.createElement(TavernPresetUiGate, Object.assign({}, props, { gate: tavernPresetUi, sessions: ctx.sessions })); })), "dsh-tavern: session preset ui gate");
+            ctx.effect(() => tavernPresetUi.add(() => slots.inject("conversation.view", () => slots.register({
                 name: "conversation.view", id: "dsh-tavern:full-context", order: 11,
                 label: "完整上下文", inject: sessionId => ({ contextSessionId: sessionId })
-            }, FullRequestContextView)), "dsh-tavern: full request context");
+            }, FullRequestContextView))), "dsh-tavern: full request context");
 			const signals = ctx.tavernSessionSignals;
 			if (!signals || typeof signals.subscribe !== "function") throw new Error("DSH Tavern Remote 状态流不可用");
 			tavernSessionSignals = signals;
@@ -10630,15 +10704,15 @@ window.__ModuleLoader__.load({
 				const taskText = "【卡片任务：" + label + "】" + targetSection + "\n\n" + String(result && result.text || "").trim() + resourceSection;
 				input.setDraft(taskText + supplement);
 			}
-			playControlsFeature.register({ ctx: ctx, slots: slots });
-			assistantRendererFeature.register({ ctx: ctx, slots: slots });
+			playControlsFeature.register({ ctx: ctx, slots: sessionScopedSlots });
+			assistantRendererFeature.register({ ctx: ctx, slots: sessionScopedSlots });
 			// Native history paging owns loading; TavernWindowedNode bounds live bodies without shadowing its slots.
 			ctx.effect(function () {
-				return slots.inject("conversation.input.right", function () { return slots.register({
+				return tavernPresetUi.add(function () { return slots.inject("conversation.input.right", function () { return slots.register({
 					name: "conversation.input.right",
 					id: "dsh-tavern-background-model",
 					order: 100
-				}, function (props) { return React.createElement(TavernBackgroundModelLabel, Object.assign({}, props, { sessions: ctx.sessions })); }); });
+				}, function (props) { return React.createElement(TavernBackgroundModelLabel, Object.assign({}, props, { sessions: ctx.sessions })); }); }); });
 			}, "dsh-tavern: background model label");
 			ctx.effect(function () {
 				return slots.inject("settings.section", function () { return slots.register({
@@ -10668,7 +10742,7 @@ window.__ModuleLoader__.load({
 				window.addEventListener("dsh-tavern-data-changed", invalidateLiveView);
 				return function () { window.removeEventListener("dsh-tavern-data-changed", invalidateLiveView); };
 			}, "dsh-tavern: live Tavern view invalidation");
-			tavernShellFeature.register({ ctx: ctx, slots: slots, appendMention: appendMention, injectTaskPrompt: injectTaskPrompt, cleanWorkspaceDraft: cleanWorkspaceDraft });
+			tavernShellFeature.register({ ctx: ctx, slots: sessionScopedSlots, appendMention: appendMention, injectTaskPrompt: injectTaskPrompt, cleanWorkspaceDraft: cleanWorkspaceDraft });
 		}
 
 		exports.TavernMessageFrame = TavernMessageFrame;
