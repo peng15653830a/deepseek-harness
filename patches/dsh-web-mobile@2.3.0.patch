@@ -1,0 +1,84 @@
+diff --git a/lib/client.js b/lib/client.js
+index 1b2ca12..742f1a9 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -1189,7 +1189,7 @@ function MobileNavToggle({ toggleSidebar, t }) {
+             frame.setAttribute('data-aionui-explorer-open', '');
+         }
+     };
+-    return ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsx)("button", { type: "button", "data-mobile-nav": "toggle", "aria-label": t('open'), title: t('open'), onClick: () => toggleSidebar(), children: (0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconPanelLeftOutline16, { size: 16 }) }), (0, jsx_runtime_1.jsx)("button", { type: "button", "data-mobile-nav": "files", "aria-label": t('files'), title: t('files'), onClick: toggleExplorer, children: (0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconFolderOpenOutline16, { size: 16 }) })] }));
++    return ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsx)("button", { type: "button", "data-mobile-nav": "toggle", "aria-label": t('open'), title: t('open'), onClick: () => toggleSidebar(), children: (0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconPanelLeftOutlineRegular, { size: 16 }) }), (0, jsx_runtime_1.jsx)("button", { type: "button", "data-mobile-nav": "files", "aria-label": t('files'), title: t('files'), onClick: toggleExplorer, children: (0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconFolderOpenOutlineRegular, { size: 16 }) })] }));
+ }
+ };
+ __modules["components/MobileDrawerFooter.js"] = function (require, module, exports) {
+@@ -1218,10 +1218,10 @@ function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSidebar, t
+         (0, phone_chrome_ts_1.getFrame)()?.setAttribute('data-aionui-explorer-open', '');
+         toggleSidebar();
+     };
+-    return ((0, jsx_runtime_1.jsxs)("div", { "data-mobile-nav": "drawer-actions", children: [(0, jsx_runtime_1.jsxs)("button", { type: "button", "data-mobile-nav": "explorer", "aria-label": t('files'), title: t('files'), onClick: openExplorer, children: [(0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconPanelLeftOutline16, { size: 14 }), (0, jsx_runtime_1.jsx)("span", { children: t('files') })] }), (0, jsx_runtime_1.jsxs)("button", { type: "button", "data-mobile-nav": "session-log", "aria-label": t('sessionLog'), title: t('sessionLog'), disabled: sessionId === undefined, onClick: () => {
++    return ((0, jsx_runtime_1.jsxs)("div", { "data-mobile-nav": "drawer-actions", children: [(0, jsx_runtime_1.jsxs)("button", { type: "button", "data-mobile-nav": "explorer", "aria-label": t('files'), title: t('files'), onClick: openExplorer, children: [(0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconPanelLeftOutlineRegular, { size: 14 }), (0, jsx_runtime_1.jsx)("span", { children: t('files') })] }), (0, jsx_runtime_1.jsxs)("button", { type: "button", "data-mobile-nav": "session-log", "aria-label": t('sessionLog'), title: t('sessionLog'), disabled: sessionId === undefined, onClick: () => {
+                     if (sessionId !== undefined)
+                         downloadSessionLog(sessionId);
+-                }, children: [(0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconDownloadOutline16, { size: 14 }), (0, jsx_runtime_1.jsx)("span", { children: t('sessionLog') })] })] }));
++                }, children: [(0, jsx_runtime_1.jsx)(dsh_client_ui_primitives_1.IconDownloadOutlineRegular, { size: 14 }), (0, jsx_runtime_1.jsx)("span", { children: t('sessionLog') })] })] }));
+ }
+ };
+ __modules["styles/base.css.js"] = function (require, module, exports) {
+diff --git a/src/client/components/MobileNavToggle.tsx b/src/client/components/MobileNavToggle.tsx
+index a5fd48b..f8ba59e 100644
+--- a/src/client/components/MobileNavToggle.tsx
++++ b/src/client/components/MobileNavToggle.tsx
+@@ -1,5 +1,5 @@
+ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import { IconFolderOpenOutline16, IconPanelLeftOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
++import { IconFolderOpenOutlineRegular, IconPanelLeftOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+ import { NS } from '../i18n/locales.ts'
+ import { getFrame } from '../effects/phone-chrome.ts'
+ 
+@@ -41,7 +41,7 @@ export function MobileNavToggle({ toggleSidebar, t }: MobileNavToggleProps) {
+         title={t('open')}
+         onClick={() => toggleSidebar()}
+       >
+-        <IconPanelLeftOutline16 size={16} />
++        <IconPanelLeftOutlineRegular size={16} />
+       </button>
+       <button
+         type="button"
+@@ -50,7 +50,7 @@ export function MobileNavToggle({ toggleSidebar, t }: MobileNavToggleProps) {
+         title={t('files')}
+         onClick={toggleExplorer}
+       >
+-        <IconFolderOpenOutline16 size={16} />
++        <IconFolderOpenOutlineRegular size={16} />
+       </button>
+     </>
+   )
+diff --git a/src/client/components/MobileDrawerFooter.tsx b/src/client/components/MobileDrawerFooter.tsx
+index 71d2a4d..0bc9ae8 100644
+--- a/src/client/components/MobileDrawerFooter.tsx
++++ b/src/client/components/MobileDrawerFooter.tsx
+@@ -1,5 +1,5 @@
+ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import { IconDownloadOutline16, IconPanelLeftOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
++import { IconDownloadOutlineRegular, IconPanelLeftOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+ import { NS } from '../i18n/locales.ts'
+ import { getFrame } from '../effects/phone-chrome.ts'
+ 
+@@ -39,7 +39,7 @@ export function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSide
+         title={t('files')}
+         onClick={openExplorer}
+       >
+-        <IconPanelLeftOutline16 size={14} />
++        <IconPanelLeftOutlineRegular size={14} />
+         <span>{t('files')}</span>
+       </button>
+       <button
+@@ -52,7 +52,7 @@ export function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSide
+           if (sessionId !== undefined) downloadSessionLog(sessionId)
+         }}
+       >
+-        <IconDownloadOutline16 size={14} />
++        <IconDownloadOutlineRegular size={14} />
+         <span>{t('sessionLog')}</span>
+       </button>
+     </div>
