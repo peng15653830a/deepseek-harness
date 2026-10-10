@@ -11,12 +11,16 @@ export interface DesktopPaths {
 
 /**
  * Resolve every Electron-owned path without changing the shared data roots.
+ * `DSH_DESKTOP_PROFILE` selects an application-owned profile, so an unpackaged
+ * shell beside the packaged desktop owns its own bundle set instead of editing
+ * the profile the packaged application boots.
  * @param dshHome - Harness home shared with npm-installed dsh.
  * @returns immutable desktop path set.
  */
 export function resolveDesktopPaths(dshHome: string = resolveDshHome()): DesktopPaths {
+  const profile = process.env.DSH_DESKTOP_PROFILE?.trim() || 'desktop'
   return {
-    profile: join(dshHome, 'profiles', 'desktop'),
-    lock: join(dshHome, 'profiles', 'desktop', 'lock'),
+    profile: join(dshHome, 'profiles', profile),
+    lock: join(dshHome, 'profiles', profile, 'lock'),
   }
 }

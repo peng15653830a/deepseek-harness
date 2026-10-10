@@ -22,12 +22,16 @@ async function main(): Promise<void> {
   const installAnchor = join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
   const profile = loadProfileDirectory('dsh', projectDir, installAnchor)
   reportSkippedBundles('dsh', profile)
+  // The launcher may boot an application-owned profile and a host port of its own,
+  // so an unpackaged shell beside the packaged desktop keeps its own bundle set.
+  const profileName = process.env.DSH_DESKTOP_PROFILE?.trim() || 'desktop'
+  const hostPort = process.env.DSH_DESKTOP_HOST_PORT?.trim() || '19387'
   const application = runProfile({
     environment: loadLayeredEnv('dsh'),
-    profile: 'desktop',
+    profile: profileName,
     resolvedProfile: { profile, installAnchor },
     patchFiles: [],
-    args: ['--no-open', '--port', '19387'],
+    args: ['--no-open', '--port', hostPort],
     ...(process.argv[5] === undefined ? {} : {
       packageManager: {
         command: process.execPath,

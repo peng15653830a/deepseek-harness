@@ -70,18 +70,28 @@ function tavernHome() {
   return resolve(process.env.DSH_HOME ?? join(DEVELOPMENT_ROOT, 'home'))
 }
 
+/** The durable home profile this launcher owns; the packaged desktop keeps the default. */
+function tavernProfile() {
+  return process.env.DSH_DESKTOP_PROFILE?.trim() || 'tavern'
+}
+
 /** Mount the Tavern bundles in the durable home profile the Host actually boots. */
 function mountTavernBundles() {
-  // 0.2 boots the Host from the durable home profile (resolveDshHome()/
-  // profiles/desktop), not the regenerated runtime project: the project only
-  // anchors package resolution.
-  const profileDir = join(tavernHome(), 'profiles', 'desktop')
+  // 0.2 boots the Host from the durable home profile (resolveDshHome()/profiles/
+  // <profile>), not the regenerated runtime project: the project only anchors
+  // package resolution. An owned profile keeps the packaged desktop's `desktop`
+  // profile free of Tavern bundles.
+  const profileDir = join(tavernHome(), 'profiles', tavernProfile())
   mkdirSync(profileDir, { recursive: true })
   const manifestPath = join(profileDir, 'package.json')
   const manifest = existsSync(manifestPath)
     ? readJson(manifestPath)
     : { name: 'dsh-profile-desktop', private: true, dsh: { profile: { bundles: [] } } }
-  const bundles = [...new Set([...(manifest.dsh?.profile?.bundles ?? BUILTIN_BUNDLES), ...TAVERN_BUNDLES])]
+  // A profile created here or left empty starts from the builtin bundles; without
+  // them the Host boots without `@deepseek-ai/dsh-web-app` and its `connection`
+  // service, and startup fails on the first `ctx.connection` read.
+  const mounted = manifest.dsh?.profile?.bundles ?? []
+  const bundles = [...new Set([...(mounted.length > 0 ? mounted : BUILTIN_BUNDLES), ...TAVERN_BUNDLES])]
   const dsh = { ...manifest.dsh, profile: { ...manifest.dsh?.profile, bundles } }
   writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, dsh }, undefined, 2)}\n`)
   // The disposable profile is regenerated on every start, so the better-sidebar
@@ -103,13 +113,15 @@ async function launchElectron() {
   const environment = {
     ...process.env,
     DSH_HOME: tavernHome(),
+    DSH_DESKTOP_PROFILE: tavernProfile(),
+    DSH_DESKTOP_HOST_PORT: process.env.DSH_DESKTOP_HOST_PORT ?? '19388',
     DSH_DESKTOP_PRIMARY_RUNTIME_DIR: process.env.DSH_DESKTOP_PRIMARY_RUNTIME_DIR ?? developmentRuntimeDirectory(),
     DSH_DESKTOP_HOST_INSPECT_PORT: process.env.DSH_DESKTOP_HOST_INSPECT_PORT ?? '9230',
     DSH_DESKTOP_NODE_BINARY: process.execPath,
     DSH_DESKTOP_OPEN_DEVTOOLS: process.env.DSH_DESKTOP_OPEN_DEVTOOLS ?? '0',
     ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING ?? '1',
   }
-  console.log(`desktop tavern: DSH_HOME=${environment.DSH_HOME}`)
+  console.log(`desktop tavern: DSH_HOME=${environment.DSH_HOME} profile=${environment.DSH_DESKTOP_PROFILE} port=${environment.DSH_DESKTOP_HOST_PORT}`)
   await run(electron, [
     `--inspect=127.0.0.1:${process.env.DSH_DESKTOP_MAIN_INSPECT_PORT ?? '9229'}`,
     `--remote-debugging-port=${process.env.DSH_DESKTOP_RENDERER_DEBUG_PORT ?? '9222'}`,
