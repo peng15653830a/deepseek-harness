@@ -480,6 +480,10 @@
       config:
         apiKeyEnv: DEEPSEEK_API_KEY
 
+    # Fork-local provider: profiles select it with `web.searchProvider: searxng`.
+    - id: web-search-searxng
+      name: '@deepseek-ai/dsh-web-search-searxng'
+
     - id: web-fetch-http
       name: '@deepseek-ai/dsh-web-fetch-http'
 
