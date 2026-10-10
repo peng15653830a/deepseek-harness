@@ -109,7 +109,12 @@ export async function prepareExpandedPatch(runtime, options = {}) {
     // it (written before this fix, or by a mixed-version install) must still
     // load, so the reader-side refusals are relaxed and classification is left
     // to tavern's own source helpers.
-    await compile('@deepseek-ai/dsh-session-format-v3-to-v4', text => once(once(once(once(once(text,
+    // Legacy Tavern journals appended world-book and card system messages
+    // mid-conversation without ever reserving the system head; a Tavern
+    // Session keeps those recorded surface nodes instead of refusing to open.
+    await compile('@deepseek-ai/dsh-session-format-v3-to-v4', text => once(once(once(once(once(once(text,
+      '\t\tif (event.type === "system/message" && this.surface.length > 0 && this.protectedHead === void 0) throw new SessionFormatError("system/message requires a protected first surface head");',
+      '\t\tif (event.type === "system/message" && this.surface.length > 0 && this.protectedHead === void 0 && !(typeof this.artifact.header.agentPreset === "string" && this.artifact.header.agentPreset.startsWith("tavern"))) throw new SessionFormatError("system/message requires a protected first surface head");'),
       '\t"workspace/changes"\n]);',
       '\t"workspace/changes",\n\t"dsh-tavern/required-session-patch-v1"\n]);'),
       'if (STEP_EVENT_TYPES.has(event.type)) this.requireStep(event, data);',
